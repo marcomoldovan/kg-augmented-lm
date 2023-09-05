@@ -1,0 +1,38 @@
+program: src/train.py
+
+project: kg-augmented-lm
+entity: marcomoldovan
+
+description: "Wikigraphs Joint Multi-Objective Training"
+
+method: bayes
+
+metric:
+  name: val/bleu
+  goal: maximize
+
+parameters:
+  model.optimizer.lr:
+    distribution: uniform
+    min: 0.0001
+    max: 0.1
+  # model.net.conv_channels:
+  #   values: [32, 64, 128, 256, 512]
+  # model.net.fc_channels:
+  #   values: [32, 64, 128, 256, 512]
+  data.batch_size:
+    values: [32, 64, 128]
+
+early_terminate:
+  type: hyperband
+  s: 2
+  eta: 3
+  max_iter: 16
+
+command:
+  # - ${env}
+  # - python
+  - C:\Users\marco\.venv\auto-ml\Scripts\python.exe #TODO fix this
+  - ${program}
+  - experiment=example_cnn
+  - ${args_no_hyphens}
