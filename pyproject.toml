@@ -53,7 +53,7 @@ rootutils = "^1.0.7"
 
 
 [tool.poetry.group.dev.dependencies]
-ipykernel = "^6.25.1"
+ipykernel = "^6.25.2"
 
 [build-system]
 requires = ["poetry-core"]
