@@ -32,14 +32,13 @@ authors = ["Marco Moldovan <marco.moldovan.1995@gmail.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.10"
 wandb = "^0.15.8"
 torch = ">=2.0.0, !=2.0.1"
 lightning = "^2.0.7"
 hydra-core = "^1.3.2"
 hydra-colorlog = "^1.2.0"
 hydra-optuna-sweeper = "^1.2.0"
-pyrootutils = "^1.0.4"
 pre-commit = "^3.3.3"
 rich = "^13.5.2"
 pytest = "^7.4.0"
