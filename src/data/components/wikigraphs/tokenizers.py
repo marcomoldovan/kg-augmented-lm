@@ -9,8 +9,7 @@ from typing import List
 import nltk
 import numpy as np
 
-from src.data.components.wikigraphs.utils import read_txt_file, normalize_freebase_string
-
+import src.data.components.wikigraphs.utils as utils
 
 
 class Tokenizer(abc.ABC):
@@ -69,7 +68,7 @@ class WordTokenizer(Tokenizer):
     Args:
       vocab_file: a csv vocab file.
     """
-    content = read_txt_file(vocab_file, encoding='utf-8')
+    content = utils.read_txt_file(vocab_file, encoding='utf-8')
 
     with io.StringIO(content) as f:
       r = csv.reader(f)
@@ -131,7 +130,7 @@ class GraphTokenizer:
     Args:
       vocab_file: path to a vocab file.
     """
-    content = read_txt_file(vocab_file, encoding='utf-16')
+    content = utils.read_txt_file(vocab_file, encoding='utf-16')
 
     vocab = content.split('\n')
     vocab = ['<pad>', '<bos>', '<unk>'] + vocab
@@ -182,7 +181,7 @@ class GraphTokenizer:
   def split_node(cls, txt: str) -> List[str]:
     """Split a node string into a sequence of tokens."""
     if txt[0] == '"' and txt[-1] == '"':  # Node is a string literal.
-      tokens = nltk.wordpunct_tokenize(normalize_freebase_string(
+      tokens = nltk.wordpunct_tokenize(utils.normalize_freebase_string(
           txt[1:-1].lower()))
       for i, t in enumerate(tokens):
         if t.isnumeric():

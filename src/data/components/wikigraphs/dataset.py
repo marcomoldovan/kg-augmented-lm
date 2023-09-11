@@ -1,14 +1,120 @@
 import re
 import abc
 import collections
-from typing import Any, Iterator, Dict, List, Tuple
+from typing import Any, Iterator, Dict, List, Tuple, NamedTuple
 import numpy as np
 import torch
 
 import src.data.components.wikigraphs.utils as utils
 from src.data.components.wikigraphs.tokenizers import WordTokenizer, GraphTokenizer
 
+class Graph:
+    """A convenience class for representing graphs."""
 
+    def __init__(self, nodes: List[str], edges: List[Tuple[int, int, str]]):
+        """Construct a graph from a list of nodes and edges.
+
+        Args:
+        nodes: a list of node attributes, one for each node.
+        edges: a list of (source_node_id, target_node_id, edge_attribute) for each
+            edge.
+        """
+        self._nodes = nodes
+        self._edges = edges
+        self._node2id = {n: i for i, n in enumerate(nodes)}
+
+    def nodes(self) -> List[str]:
+        return self._nodes
+
+    def edges(self) -> List[Tuple[int, int, str]]:
+        return self._edges
+
+    def node2id(self, node: str) -> int:
+        return self._node2id[node]
+
+    @classmethod
+    def from_edges(cls, edges: List[str]) -> 'Graph':
+        """Build a graph instance from a list of edges."""
+        node2id = dict()
+        parsed_edges = []
+        next_node_id = 0
+
+        for e in edges:
+            src, edge, tgt = e.split('\t')[:3]
+            src_id = node2id.get(src, next_node_id)
+            if src_id == next_node_id:
+                node2id[src] = src_id
+                next_node_id += 1
+            tgt_id = node2id.get(tgt, next_node_id)
+            if tgt_id == next_node_id:
+                node2id[tgt] = tgt_id
+                next_node_id += 1
+            parsed_edges.append((src_id, tgt_id, edge))
+
+        id2node = {i: n for n, i in node2id.items()}
+        return Graph(nodes=[id2node[i] for i in range(next_node_id)],
+                    edges=parsed_edges)
+
+    def to_edges(self) -> List[str]:
+        r"""Convert graph to a list of edges.
+
+        The converted list of edges should be compatible with the format specified
+        in io_tools and compatible with the `from_edges` method above.
+
+        Returns:
+        edges: one edge per line, with the (source, target, edge_type) separated
+            by `\t`.
+        """
+        edges = []
+        for s, t, e in self._edges:
+            edges.append(f'{self._nodes[s]}\t{e}\t{self._nodes[t]}')
+        return edges
+
+    @classmethod
+    def subsample_nodes(
+        cls, graph: 'Graph', subsample_rate: float = 1.0, center_node: str = None
+        ) -> 'Graph':
+        """Subsample the nodes of a graph."""
+        graph_size = len(graph.nodes())
+        if subsample_rate == 1.0 or graph_size <= 1:
+            return graph
+        subsampled_nodes_id = np.arange(graph_size)
+        if subsample_rate < 1.0:
+            subsample_graph_size = int(subsample_rate * graph_size)
+            if center_node is not None:
+                # We need to keep the center node during subsampling
+                center_node_id = graph.node2id(center_node)
+                subsampled_nodes_id = subsampled_nodes_id[
+                    subsampled_nodes_id != center_node_id]
+                subsample_graph_size = max(1, subsample_graph_size - 1)
+                subsampled_nodes_id = np.random.choice(
+                    subsampled_nodes_id, subsample_graph_size, replace=False)
+                subsampled_nodes_id = np.append(subsampled_nodes_id, center_node_id)
+            else:
+                subsampled_nodes_id = np.random.choice(
+                    subsampled_nodes_id, subsample_graph_size, replace=False)
+            subsampled_nodes_id = np.sort(subsampled_nodes_id)
+            map_subsampled_nodes_id = {
+                old_id: new_id for new_id, old_id in enumerate(subsampled_nodes_id)}
+        nodes = []
+        edges = []
+        for node_id, n in enumerate(graph.nodes()):
+            if node_id in subsampled_nodes_id:
+                nodes.append(n)
+        for out_node, in_node, e in graph.edges():
+            if out_node in subsampled_nodes_id and in_node in subsampled_nodes_id:
+                edges.append((map_subsampled_nodes_id[out_node],
+                            map_subsampled_nodes_id[in_node], e))
+        return Graph(nodes=nodes, edges=edges)
+    
+    
+class ParsedGraphTextPair(NamedTuple):
+    """Graph-text pair with graph parsed into a `Graph` instance."""
+    center_node: str
+    title: str
+    text: str
+    graph: Graph
+    
 
 class Dataset(abc.ABC):
     """Base class for all datasets.
@@ -67,7 +173,7 @@ class RawDataset(Dataset):
     def _load_data(self):
         """Prepare data for another pass through the dataset."""
         if self._dataset is None:
-            data_root = self._data_dir + ('-raw' if self._version == 'raw' else '')
+            data_root = self._data_dir + '/wikitext-103' + ('-raw' if self._version == 'raw' else '')
             self._dataset = utils.articles_from_file(
                 f'{data_root}/wiki.{self._subset}.{self._version}')
 
@@ -80,6 +186,55 @@ class RawDataset(Dataset):
             for i in range(n_articles):
                 yield self._dataset[idx[i]]
                 
+        return source()
+    
+    
+class RawPairedDataset(Dataset):
+    """The untokenized raw dataset."""
+
+    def __init__(self,
+                subset: str = 'train',
+                shuffle_data: bool = False,
+                data_dir: str = None,
+                version: str = 'max256'):
+        """Constructor.
+
+        Args:
+        subset: which subset to load.
+        shuffle_data: set to True to randomly shuffle the data.
+        data_dir: if provided this will be used instead of the default location to
+            look for data, it must contain files like `train.gz`, `valid.gz` and
+            `test.gz`.
+        version: which version of the data to load, this must be the name of a
+            directory in `DATA_ROOT`.
+        """
+        super().__init__()
+        self._subset = subset
+        self._shuffle_data = shuffle_data
+        self._data_dir = data_dir
+        self._dataset = None
+
+        allowed_versions = ('max256', 'max512', 'max1024')
+        if version not in allowed_versions:
+            raise ValueError(f'Version {version} not one of the allowed versions:'
+                            f' {allowed_versions}.')
+        self._version = version
+
+    def _load_data(self):
+        """Load and prepare the data iterator."""
+        if self._dataset is None:
+            self._dataset = list(utils.read_pairs_from_gzip_txt_file(
+                f'{self._data_dir}/wikigraphs/{self._version}/{self._subset}.gz'))
+
+        def source():
+            n_pairs = len(self._dataset)
+            if self._shuffle_data:
+                idx = np.random.permutation(n_pairs)
+            else:
+                idx = np.arange(n_pairs)
+            for i in range(n_pairs):
+                yield self._dataset[idx[i]]
+
         return source()
     
     
@@ -103,7 +258,7 @@ class ParsedDataset(Dataset):
             directory in `DATA_ROOT`.
         """
         super().__init__()
-        self._raw_data = RawDataset(subset=subset, shuffle_data=False,
+        self._raw_data = RawPairedDataset(subset=subset, shuffle_data=False,
                                     data_dir=data_dir, version=version)
         self._shuffle_data = shuffle_data
         self._dataset = None
@@ -111,10 +266,10 @@ class ParsedDataset(Dataset):
     def _load_data(self):
         if self._dataset is None:
         # pylint: disable=g-complex-comprehension
-            self._dataset = [utils.ParsedGraphTextPair(center_node=pair.center_node,
+            self._dataset = [ParsedGraphTextPair(center_node=pair.center_node,
                                                 title=pair.title,
                                                 text=pair.text,
-                                                graph=utils.Graph.from_edges(pair.edges))
+                                                graph=Graph.from_edges(pair.edges))
                             for pair in self._raw_data]
 
         def source():
@@ -163,14 +318,14 @@ class WikigraphDataset(torch.utils.data.Dataset):
                             f' {allowed_versions}.')
             
         # 1. RawDataset
-        self._raw_data = list(self._read_pairs_from_gzip_txt_file(
+        self._raw_data = list(utils.read_pairs_from_gzip_txt_file(
           f'{self._data_dir}/{self._version}/{self._subset}.gz'))
         
         # 2. ParsedDataset
-        self._parsed_data = [utils.ParsedGraphTextPair(center_node=pair.center_node,
+        self._parsed_data = [ParsedGraphTextPair(center_node=pair.center_node,
                                                  title=pair.title,
                                                  text=pair.text,
-                                                 graph=utils.Graph.from_edges(pair.edges))
+                                                 graph=Graph.from_edges(pair.edges))
                              for pair in self._raw_data]
         
         # 3. BaseGraph2TextDataset
@@ -186,10 +341,10 @@ class WikigraphDataset(torch.utils.data.Dataset):
         return dict(obs=seq[:self._timesteps], graph=graph, seq_id=seq_id, graph_id=graph_id)
     
     
-    def _process_graph(self, center_node: str, graph: utils.Graph):
+    def _process_graph(self, center_node: str, graph: Graph):
         """Process the graph part of a `ParsedGraphTextPair` instance."""
         if self._subsample_nodes < 1.0:
-            graph = utils.Graph.subsample_nodes(graph, self._subsample_nodes, center_node)
+            graph = Graph.subsample_nodes(graph, self._subsample_nodes, center_node)
 
         nodes = graph.nodes()
         edges = graph.edges()
@@ -218,7 +373,7 @@ class WikigraphDataset(torch.utils.data.Dataset):
 
 
     def _process_graph_text_pair(
-        self, pair: utils.ParsedGraphTextPair) -> Tuple[Any, np.ndarray]:
+        self, pair: ParsedGraphTextPair) -> Tuple[Any, np.ndarray]:
         """Process the given graph-text pair and prepare one example.
 
         Args:
@@ -231,40 +386,6 @@ class WikigraphDataset(torch.utils.data.Dataset):
         return (self._process_graph(pair.center_node, pair.graph),
                 self._tokenizer.encode(
                     pair.text, prepend_bos=True, append_eos=True))
-        
-    
-    def _read_pairs_from_gzip_txt_file(file_path: str) -> Iterator[utils.GraphTextPair]:
-        """Read graph-text pairs from gzip txt files.
-
-        Args:
-            file_path: a `.gz` file of graph-text pairs written in the same format as
-            using the `write_pairs_to_gzip_txt_file` function.
-
-        Yields:
-            Graph-text pairs from this file.
-        """
-        content = utils.read_gzip_txt_file(file_path)
-
-        graph_header_sep_re = re.compile(
-            r'(<graph center=[^ ]+ title="[^"]+">)')
-        graph_header_re = re.compile(
-            r'<graph center=([^ ]+) title="([^"]+)">$')
-        section_sep_re = re.compile(r'\n(<section id="[^"]+">\n)')
-        parts = graph_header_sep_re.split(content)
-
-        # Skip the first part which is empty
-        for i in range(1, len(parts), 2):
-            header, body = parts[i], parts[i + 1]
-            m = graph_header_re.match(header)
-
-            # 5 parts total, empty first part, "text", text section, "edges", edges
-            # section.
-            section_parts = section_sep_re.split(body)
-
-            yield utils.GraphTextPair(center_node=m.group(1),
-                                title=m.group(2),
-                                text=section_parts[2],
-                                edges=section_parts[-1].strip().split('\n'))
                  
         
     def _to_graph_with_features(self, nodes_bow, edges_bow, sender, receiver, center_node_id):

@@ -9,112 +9,6 @@ from src import utils
 
 log = utils.get_pylogger(__name__)
 
-class Graph:
-    """A convenience class for representing graphs."""
-
-    def __init__(self, nodes: List[str], edges: List[Tuple[int, int, str]]):
-        """Construct a graph from a list of nodes and edges.
-
-        Args:
-        nodes: a list of node attributes, one for each node.
-        edges: a list of (source_node_id, target_node_id, edge_attribute) for each
-            edge.
-        """
-        self._nodes = nodes
-        self._edges = edges
-        self._node2id = {n: i for i, n in enumerate(nodes)}
-
-    def nodes(self) -> List[str]:
-        return self._nodes
-
-    def edges(self) -> List[Tuple[int, int, str]]:
-        return self._edges
-
-    def node2id(self, node: str) -> int:
-        return self._node2id[node]
-
-    @classmethod
-    def from_edges(cls, edges: List[str]) -> 'Graph':
-        """Build a graph instance from a list of edges."""
-        node2id = dict()
-        parsed_edges = []
-        next_node_id = 0
-
-        for e in edges:
-            src, edge, tgt = e.split('\t')[:3]
-            src_id = node2id.get(src, next_node_id)
-            if src_id == next_node_id:
-                node2id[src] = src_id
-                next_node_id += 1
-            tgt_id = node2id.get(tgt, next_node_id)
-            if tgt_id == next_node_id:
-                node2id[tgt] = tgt_id
-                next_node_id += 1
-            parsed_edges.append((src_id, tgt_id, edge))
-
-        id2node = {i: n for n, i in node2id.items()}
-        return Graph(nodes=[id2node[i] for i in range(next_node_id)],
-                    edges=parsed_edges)
-
-    def to_edges(self) -> List[str]:
-        r"""Convert graph to a list of edges.
-
-        The converted list of edges should be compatible with the format specified
-        in io_tools and compatible with the `from_edges` method above.
-
-        Returns:
-        edges: one edge per line, with the (source, target, edge_type) separated
-            by `\t`.
-        """
-        edges = []
-        for s, t, e in self._edges:
-            edges.append(f'{self._nodes[s]}\t{e}\t{self._nodes[t]}')
-        return edges
-
-    @classmethod
-    def subsample_nodes(
-        cls, graph: 'Graph', subsample_rate: float = 1.0, center_node: str = None
-        ) -> 'Graph':
-        """Subsample the nodes of a graph."""
-        graph_size = len(graph.nodes())
-        if subsample_rate == 1.0 or graph_size <= 1:
-            return graph
-        subsampled_nodes_id = np.arange(graph_size)
-        if subsample_rate < 1.0:
-            subsample_graph_size = int(subsample_rate * graph_size)
-            if center_node is not None:
-                # We need to keep the center node during subsampling
-                center_node_id = graph.node2id(center_node)
-                subsampled_nodes_id = subsampled_nodes_id[
-                    subsampled_nodes_id != center_node_id]
-                subsample_graph_size = max(1, subsample_graph_size - 1)
-                subsampled_nodes_id = np.random.choice(
-                    subsampled_nodes_id, subsample_graph_size, replace=False)
-                subsampled_nodes_id = np.append(subsampled_nodes_id, center_node_id)
-            else:
-                subsampled_nodes_id = np.random.choice(
-                    subsampled_nodes_id, subsample_graph_size, replace=False)
-            subsampled_nodes_id = np.sort(subsampled_nodes_id)
-            map_subsampled_nodes_id = {
-                old_id: new_id for new_id, old_id in enumerate(subsampled_nodes_id)}
-        nodes = []
-        edges = []
-        for node_id, n in enumerate(graph.nodes()):
-            if node_id in subsampled_nodes_id:
-                nodes.append(n)
-        for out_node, in_node, e in graph.edges():
-            if out_node in subsampled_nodes_id and in_node in subsampled_nodes_id:
-                edges.append((map_subsampled_nodes_id[out_node],
-                            map_subsampled_nodes_id[in_node], e))
-        return Graph(nodes=nodes, edges=edges)
-
-
-class ParsedGraphTextPair(NamedTuple):
-    """Graph-text pair with graph parsed into a `Graph` instance."""
-    center_node: str
-    title: str
-    text: str
-    graph: Graph
 
 
 class GraphTextPair(NamedTuple):
@@ -128,6 +22,13 @@ class GraphTextPair(NamedTuple):
 class WikitextArticle(NamedTuple):
     title: str
     text: str
+    
+    
+class Graph(NamedTuple):
+  title: str
+  center: str
+  edges: List[str]
+
     
     
 def read_gzip_txt_file(file_path: str, encoding: str = 'utf-8') -> str:
@@ -246,3 +147,37 @@ def write_pairs_to_gzip_txt_file(file_path, pairs):
     for p in pairs:
         lines.extend(pair2lines(p))
     write_lines_to_gzipped_file(file_path, lines)
+
+
+def read_pairs_from_gzip_txt_file(file_path: str) -> Iterator[GraphTextPair]:
+    """Read graph-text pairs from gzip txt files.
+
+    Args:
+        file_path: a `.gz` file of graph-text pairs written in the same format as
+        using the `write_pairs_to_gzip_txt_file` function.
+
+    Yields:
+        Graph-text pairs from this file.
+    """
+    content = read_gzip_txt_file(file_path)
+
+    graph_header_sep_re = re.compile(
+        r'(<graph center=[^ ]+ title="[^"]+">)')
+    graph_header_re = re.compile(
+        r'<graph center=([^ ]+) title="([^"]+)">$')
+    section_sep_re = re.compile(r'\n(<section id="[^"]+">\n)')
+    parts = graph_header_sep_re.split(content)
+
+    # Skip the first part which is empty
+    for i in range(1, len(parts), 2):
+        header, body = parts[i], parts[i + 1]
+        m = graph_header_re.match(header)
+
+        # 5 parts total, empty first part, "text", text section, "edges", edges
+        # section.
+        section_parts = section_sep_re.split(body)
+
+        yield GraphTextPair(center_node=m.group(1),
+                            title=m.group(2),
+                            text=section_parts[2],
+                            edges=section_parts[-1].strip().split('\n'))

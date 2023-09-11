@@ -1,3 +1,9 @@
+import sys
+import os
+import io
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
 from typing import Any, Dict, Optional
 
 from lightning import LightningDataModule
@@ -70,8 +76,6 @@ class WikigraphsDataModule(LightningDataModule):
         """
         super().__init__()
         
-        print('Hi')
-
         # this line allows to access init params with 'self.hparams' attribute
         # also ensures init params will be stored in ckpt
         self.save_hyperparameters(logger=False)
@@ -120,8 +124,8 @@ class WikigraphsDataModule(LightningDataModule):
 
         :param stage: The stage to setup. Either `"fit"`, `"validate"`, `"test"`, or `"predict"`. Defaults to ``None``.
         """
-        self.word_tokenizer = WordTokenizer()
-        self.graph_tokenizer = GraphTokenizer()
+        self.word_tokenizer = WordTokenizer(f'{self.hparams.data_dir}/text-vocab.csv')
+        self.graph_tokenizer = GraphTokenizer(f'{self.hparams.data_dir}/graph-vocab.csv')
         
         self.text_vocab_size = self.word_tokenizer.vocab_size
         self.graph_vocab_size = self.graph_tokenizer.vocab_size
@@ -213,4 +217,7 @@ class WikigraphsDataModule(LightningDataModule):
 
 
 if __name__ == "__main__":
-    _ = WikigraphsDataModule()
+    # _ = WikigraphsDataModule()
+    
+    dm = WikigraphsDataModule()
+    dm.prepare_data()
