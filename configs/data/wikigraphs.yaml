@@ -1,3 +1,11 @@
 _target_: src.data.wikigraphs_datamodule.WikigraphsDataModule
 data_dir: ${paths.data_dir}wikigraphs/
+text_vocab_threshold: 3
+graph_vocab_threshold: 15
+text_only: False
 batch_size: 128
+timesteps: 128
+subsample_rate: 1.0
+version: max256
+max_center_split_offset: 16
+split_overlap: 1

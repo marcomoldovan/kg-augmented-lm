@@ -119,6 +119,9 @@ class WordTokenizer(Tokenizer):
 
   def bos_token(self):
     return self._bos_token
+  
+  def sentence_delimiters(self):
+    return self.encode('. ! ?')
 
 
 class GraphTokenizer:

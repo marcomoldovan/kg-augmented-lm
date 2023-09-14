@@ -4,6 +4,7 @@ import collections
 from typing import Any, Iterator, Dict, List, Tuple, NamedTuple
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 import src.data.components.wikigraphs.utils as utils
 from src.data.components.wikigraphs.tokenizers import WordTokenizer, GraphTokenizer
@@ -114,6 +115,19 @@ class ParsedGraphTextPair(NamedTuple):
     title: str
     text: str
     graph: Graph
+    
+    
+class GraphTensors(NamedTuple):
+    """Graph representation as tensors can be fed directly into GAT."""
+    nodes: torch.Tensor
+    adj_mat: torch.Tensor
+    
+
+class SequenceChunk(NamedTuple):
+    """A chunk of a sequence."""
+    seq_idx: int
+    start: int
+    end: int
     
 
 class Dataset(abc.ABC):
@@ -296,21 +310,25 @@ class WikigraphDataset(torch.utils.data.Dataset):
                  subsample_rate: float = 1.0,
                  version: str = 'max256',
                  subset: str = 'train',
+                 max_center_split_offset: int = 16,
+                 split_overlap: int = 1
                  ) -> None:
         super().__init__()
                 
         self._tokenizer = tokenizer
         self._graph_tokenizer = graph_tokenizer
         self._data_dir = data_dir
-        self._text_only = text_only #TODO implement text-only option
+        self._text_only = text_only
         self._batch_size = batch_size
         self._timesteps = timesteps
-        self._graph_feature_dim = None
-        self._pad_value = None
-        self._placeholder_graph = None
+        self._graph_feature_dim = graph_tokenizer.vocab_size
+        self._pad_value = self._tokenizer.pad_token()
         self._subsample_nodes = subsample_rate
         self._version = version 
         self._subset = subset
+        self._sentence_delimiters = self._tokenizer.sentence_delimiters()
+        self._max_center_split_offset = max_center_split_offset
+        self._split_overlap = split_overlap
         
         allowed_versions = ('max256', 'max512', 'max1024')
         if version not in allowed_versions:
@@ -319,7 +337,7 @@ class WikigraphDataset(torch.utils.data.Dataset):
             
         # 1. RawDataset
         self._raw_data = list(utils.read_pairs_from_gzip_txt_file(
-          f'{self._data_dir}/{self._version}/{self._subset}.gz'))
+          f'{self._data_dir}/wikigraphs/{self._version}/{self._subset}.gz'))
         
         # 2. ParsedDataset
         self._parsed_data = [ParsedGraphTextPair(center_node=pair.center_node,
@@ -330,19 +348,21 @@ class WikigraphDataset(torch.utils.data.Dataset):
         
         # 3. BaseGraph2TextDataset
         self._dataset = [self._process_graph_text_pair(p) for p in self._parsed_data]
+        
+        # 4. Graph tensors
+        self._graph_tensors = [self._raw_graph_to_tensor(*graph) for graph, _ in self._dataset]
+        
+        # 5. Chunked Dataset
+        self._chunked_sequences = [chunk for idx, (_, seq) in enumerate(self._dataset) 
+                                   for chunk in self._chunk_graph_text_pair(idx, seq)]
+        
+        # 6. Count total number of tokens
+        self._n_tokens = sum([len(seq) for _, seq in self._dataset])
       
       
-    def __len__(self):
-        return len(self._dataset)
-    
-    
-    def __getitem__(self, index) -> Any:
-        (graph, seq), (graph_id, seq_id) = self._dataset[index]
-        return dict(obs=seq[:self._timesteps], graph=graph, seq_id=seq_id, graph_id=graph_id)
-    
-    
     def _process_graph(self, center_node: str, graph: Graph):
         """Process the graph part of a `ParsedGraphTextPair` instance."""
+        
         if self._subsample_nodes < 1.0:
             graph = Graph.subsample_nodes(graph, self._subsample_nodes, center_node)
 
@@ -386,10 +406,14 @@ class WikigraphDataset(torch.utils.data.Dataset):
         return (self._process_graph(pair.center_node, pair.graph),
                 self._tokenizer.encode(
                     pair.text, prepend_bos=True, append_eos=True))
-                 
-        
-    def _to_graph_with_features(self, nodes_bow, edges_bow, sender, receiver, center_node_id):
-        """Convert the input to a more readable dict"""
+    
+    
+    def _raw_graph_to_tensor(
+        self, nodes_bow, edges_bow, sender, receiver, center_node_id
+        ) -> GraphTensors:
+        """Convert the input to a named tuple instance containing pytorch 
+        tensors for nodes and adjacency matrix.
+        """
         n_nodes = len(nodes_bow)
         n_edges = len(edges_bow)
 
@@ -404,91 +428,155 @@ class WikigraphDataset(torch.utils.data.Dataset):
         for i, bow in enumerate(edges_bow):
             for t, c in bow.items():
                 edges[i][t] = c
-                
-        return dict(nodes=nodes, edges=edges, senders=sender, receivers=receiver,
-            globals=None, n_node=np.array([n_nodes], dtype=np.int32),
-            n_edge=np.array([n_edges], dtype=np.int32))
+
+        # Convert nodes to PyTorch tensors
+        nodes_tensor = torch.tensor([np.argmax(row) for row in nodes], dtype=torch.float32)
+        
+        # Create adjacency matrix
+        adjacency_matrix = torch.zeros(n_nodes, n_nodes, dtype=torch.float32)
+        for i in range(n_edges):
+            adjacency_matrix[sender[i], receiver[i]] = np.argmax(edges[i]).item()
+
+        return GraphTensors(nodes=nodes_tensor, adj_mat=adjacency_matrix)
+        
+        
+    def _chunk_graph_text_pair(self, seq_idx, seq):
+        """Compute valid chunks for a single sequence.""" 
+        chunks = []
+        position = 0
+        while position < len(seq):
+            chunk_end = position + self._timesteps
+            if chunk_end > len(seq):
+                # If this is the last chunk of the sequence and it's shorter than timesteps
+                chunk_end = len(seq)
+            else:
+                # Adjust the chunk to end on the last sentence end index before chunk_end
+                adjusted_end = max([i for i in range(position, chunk_end) 
+                                    if seq[i] in self._sentence_delimiters], default=chunk_end-1) + 1
+                chunk_end = adjusted_end
+
+            seq_chunk = SequenceChunk(seq_idx, position, chunk_end)
+            chunks.append(seq_chunk)
+            position = chunk_end
+        
+        return chunks
     
     
-    def _process_graph_batch(self, graphs: List[Any]):
-        """Process a batch of graph data.
-
-        Args:
-        graphs: a list of graph data, each as returned by `_process_graph`.
-
-        Returns:
-        processed_graphs: a list of processed tensor(s).
-        """
-        graphs = [g if g is not None else self._placeholder_graph for g in graphs]
-        return [self._to_graph_with_features(*g) for g in graphs]
-
-    
-    def _pad_to(self, x: np.array, size: int, axis: int = -1, pad_value: float = 0.):
-        """Pad an array to the specified size along a specified axis."""
-        if x.shape[axis] > size:
-            raise ValueError(f'Data item has size {x.shape[axis]} larger than {size}'
-                            f' in axis {axis} already.')
-        elif x.shape[axis] == size:
-            return x
+    def _split_seq_into_input_target(self, seq):
+        delimiter_indices = [i for i, id in enumerate(seq) if id in self._sentence_delimiters]
+        if (len(seq) % 2) == 0:
+            center_index = (len(seq) // 2) - 1
         else:
-            pad_amount = [(0, 0)] * x.ndim
-            pad_amount[axis] = (0, size - x.shape[axis])
-            return np.pad(x, pad_amount, mode='constant', constant_values=pad_value)
+            center_index = len(seq) // 2
+
+        # If there are no delimiters, split the list in the middle
+        if not delimiter_indices:
+            return seq[:center_index + self._split_overlap], seq[center_index:]
+
+        # Find the delimiter index closest to the center of the list
+        closest_delimiter_index = min(delimiter_indices, key=lambda i: abs(i - center_index))
+        if abs(center_index - closest_delimiter_index) > self._max_center_split_offset:
+            return seq[:center_index + self._split_overlap], seq[center_index:]
+
+        # If the delimiter is at the end of the list, split the list in the middle, excluding the delimiter
+        if closest_delimiter_index == len(seq) - 1:
+            return seq[:center_index + self._split_overlap], seq[center_index:]
+
+        # Otherwise, split the list at the delimiter index
+        return seq[:closest_delimiter_index + self._split_overlap + 1], seq[closest_delimiter_index + 1:]
+        
+      
+    def __len__(self):
+        return len(self._chunked_sequences)
+    
+    
+    def __getitem__(self, index) -> Any:
+        chunk = self._chunked_sequences[index]
+        seq = self._dataset[chunk.seq_idx][1][chunk.start:chunk.end]
+        input_seq, target_seq = self._split_seq_into_input_target(seq)
+        if self._text_only:
+            return dict(input_seq=input_seq, target_seq=target_seq)
+        else:
+            graph = self._graph_tensors[chunk.seq_idx]
+            return dict(graph=graph, input_seq=input_seq, target_seq=target_seq)
 
 
-    def collate_fn(self, batch):
+    def collate_fn(self, batch): #TODO add text only functionality
+        max_seq_len = max(
+            [len(e['input_seq']) for e in batch] + [len(e['target_seq']) for e in batch])
+        max_nodes = max([e['graph'].nodes.size(0) for e in batch])
+        max_adj_mat_size = max([e['graph'].adj_mat.size(0) for e in batch])
+        
+        input_attention_masks = []
+        target_attention_masks = []
+        nodes = []
+        adj_mats = []
+        
         for e in batch:
-            e['obs'] = self._pad_to(e['obs'], self._timesteps, axis=0, pad_value=self._pad_value)
-        batch = dict(
-            obs=np.stack([e['obs'] for e in batch], axis=0),
-            graphs=[e['graph'] for e in batch],
-            should_reset=np.stack([e['should_reset'] for e in batch], axis=0))
-        batch = map(lambda x: dict(  # pylint: disable=g-long-lambda #??????
-            obs=x['obs'][:, :-1],
-            target=x['obs'][:, 1:],
-            should_reset=x['should_reset'][:, :-1],
-            # If target is a <pad> token then that target should not be predicted.
-            mask=(x['obs'][:, 1:] != self._tokenizer.pad_token()).astype(
-                np.float32),
-            graphs=self._process_graph_batch(x['graphs']),
-            ), batch)
-        return batch
+            input_attn_mask = torch.zeros(max_seq_len, dtype=torch.float32)
+            input_attn_mask[:len(e['input_seq'])] = 1
+            input_attention_masks.append(input_attn_mask)
+            e['input_seq'] = F.pad(
+                torch.tensor(e['input_seq']),
+                (0, max_seq_len - e['input_seq'].shape[-1]), 
+                'constant', 
+                self._pad_value)
+            target_attention_mask = torch.zeros(max_seq_len, dtype=torch.float32)
+            target_attention_mask[:len(e['target_seq'])] = 1
+            target_attention_masks.append(target_attention_mask)
+            e['target_seq'] = F.pad(
+                torch.tensor(e['target_seq']),
+                (0, max_seq_len - e['target_seq'].shape[-1]), 
+                'constant', 
+                self._pad_value)
+            nodes.append(F.pad(
+                e['graph'].nodes,
+                (0, max_nodes - e['graph'].nodes.shape[-1]),
+                'constant', 
+                self._pad_value))
+            adj_mat = e['graph'].adj_mat
+            adj_mats.append(F.pad(
+                adj_mat, 
+                (0, max(0, max_adj_mat_size - adj_mat.size(1)), 0, max(0, max_adj_mat_size - adj_mat.size(0))),
+                'constant',
+                value=self._pad_value)[:max_adj_mat_size, :max_adj_mat_size])
+            
+        input_seq = torch.stack([e['input_seq'] for e in batch], dim=0)
+        input_attention_masks = torch.stack(input_attention_masks, dim=0)
+        target_seq = torch.stack([e['target_seq'] for e in batch], dim=0)
+        target_attention_masks = torch.stack(target_attention_masks, dim=0)
+        node_features = torch.stack(nodes, dim=0)
+        adj_mats = torch.stack(adj_mats, dim=0)
+        
+        return dict(
+            input_seq=input_seq,
+            input_attention_masks=input_attention_masks,
+            target_seq=target_seq,
+            target_attention_masks=target_attention_masks, 
+            node_features=node_features, 
+            adj_mats=adj_mats)
         
   
     def return_faux_batch(self) -> Dict[str, np.ndarray]:
         """Return a fake batch with the right shapes and dimensions."""
-        obs = torch.zeros([self._batch_size, self._timesteps], dtype=torch.int32)
-        target = torch.zeros([self._batch_size, self._timesteps], dtype=torch.int32)
-        should_reset = torch.zeros_like(obs, dtype=torch.float32)
-        mask = torch.zeros_like(obs, dtype=torch.float32)
-        
-        # A batch should contain `batch_size` graphs.
-        # Here we make sure each graph has one node and one edge.
-        graphs = []
-        for _ in range(self._batch_size):
-            nodes = torch.zeros([1, self._graph_feature_dim + 1], dtype=torch.float32)
-            edges = torch.zeros([1, self._graph_feature_dim], dtype=torch.float32)
-            senders = torch.zeros([1], dtype=torch.int32)
-            receivers = torch.zeros([1], dtype=torch.int32)
-            n_node = torch.ones(1, dtype=torch.int32)
-            n_edge = torch.ones(1, dtype=torch.int32)
-            globals_ = None  # Change this if you have global features
+        input_seq = torch.randint(
+            low=0, high=self._tokenizer.vocab_size, size=(self._batch_size, self._timesteps))
+        input_attention_masks = torch.ones(
+            (self._batch_size, self._timesteps), dtype=torch.float32)
+        target_seq = torch.randint(
+            low=0, high=self._tokenizer.vocab_size, size=(self._batch_size, self._timesteps))
+        target_attention_masks = torch.ones(
+            (self._batch_size, self._timesteps), dtype=torch.float32)
+        node_features = torch.randint(
+            low=0, high=self._graph_feature_dim, size=(self._batch_size, self._timesteps))
+        adj_mats = torch.randint(
+            low=0, high=self._graph_feature_dim, size=(self._batch_size, self._timesteps, self._timesteps))
 
-            graphs.append({
-                'nodes': nodes,
-                'edges': edges,
-                'senders': senders,
-                'receivers': receivers,
-                'n_node': n_node,
-                'n_edge': n_edge,
-                'globals': globals_
-            })
-
-        return {
-            'obs': obs,
-            'target': target,
-            'mask': mask,
-            'should_reset': should_reset,
-            'graphs': graphs
-        }
+        return dict(
+            input_seq=input_seq,
+            input_attention_masks=input_attention_masks,
+            target_seq=target_seq,
+            target_attention_masks=target_attention_masks, 
+            node_features=node_features, 
+            adj_mats=adj_mats)
         

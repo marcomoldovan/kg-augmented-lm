@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import pytest
-import torch
 
 from src.data.wikigraphs_datamodule import WikigraphsDataModule
 from src.data.wikidata5m_datamodule import Wikidata5mDataModule
@@ -38,20 +37,16 @@ def test_wikigraphs_datamodule(batch_size: int) -> None:
     # Build text vocab
     assert Path(data_dir, 'text-vocab.csv').exists()
 
-    dm.setup()
+    dm.setup("fit")
     assert dm.data_train and dm.data_val and dm.data_test
     
-    # assert dm.train_dataloader() and dm.val_dataloader() and dm.test_dataloader()
+    assert dm.train_dataloader() and dm.val_dataloader() and dm.test_dataloader()
 
-    # num_datapoints = len(dm.data_train) + len(dm.data_val) + len(dm.data_test)
-    # assert num_datapoints == 23522
-
-    # batch = next(iter(dm.train_dataloader()))
-    # x, y = batch
-    # assert len(x) == batch_size
-    # assert len(y) == batch_size
-    # assert x.dtype == torch.float32
-    # assert y.dtype == torch.int64
+    batch = next(iter(dm.train_dataloader()))
+    assert len(batch['input_seq']) == batch_size
+    assert len(batch['target_seq']) == batch_size
+    assert len(batch['node_features']) == batch_size
+    assert len(batch['adj_mats']) == batch_size
     
     
 # @pytest.mark.parametrize("batch_size", [32, 128])

@@ -63,6 +63,8 @@ class WikigraphsDataModule(LightningDataModule):
         timesteps: int = 128,
         subsample_rate: float = 1.0,
         version: str = "max256",
+        max_center_split_offset: int = 16,
+        split_overlap: int = 1,
         num_workers: int = 0,
         pin_memory: bool = False,
     ) -> None:
@@ -89,7 +91,6 @@ class WikigraphsDataModule(LightningDataModule):
         
         self.text_vocab_size: Optional[int] = None
         self.graph_vocab_size: Optional[int] = None
-
 
     def prepare_data(self) -> None:
         """Download data if needed. Lightning ensures that `self.prepare_data()` is called only
@@ -219,5 +220,8 @@ class WikigraphsDataModule(LightningDataModule):
 if __name__ == "__main__":
     # _ = WikigraphsDataModule()
     
-    dm = WikigraphsDataModule()
+    dm = WikigraphsDataModule(batch_size=4)
     dm.prepare_data()
+    dm.setup('fit')
+    batch = next(iter(dm.train_dataloader()))
+    print(batch)
