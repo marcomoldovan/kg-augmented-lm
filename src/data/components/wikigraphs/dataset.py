@@ -579,6 +579,8 @@ class WikigraphDataset(torch.utils.data.Dataset):
             low=0, high=self._graph_feature_dim, size=(self._batch_size, self._timesteps))
         adj_mats = torch.randint(
             low=0, high=self._graph_feature_dim, size=(self._batch_size, self._timesteps, self._timesteps))
+        masked_nodes, node_masks, masked_adj, adj_masks = mask_nodes_and_adj(
+            node_features, adj_mats, self._pad_value)
 
         return dict(
             input_seq=input_seq,
@@ -586,5 +588,9 @@ class WikigraphDataset(torch.utils.data.Dataset):
             target_seq=target_seq,
             target_attention_masks=target_attention_masks, 
             node_features=node_features, 
-            adj_mats=adj_mats)
+            masked_nodes_features=masked_nodes,
+            node_masks=node_masks,
+            adj_mats=adj_mats,
+            masked_adj_mats=masked_adj,
+            adj_masks=adj_masks)
         
