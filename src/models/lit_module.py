@@ -10,7 +10,8 @@ from src.models.components.kg_augmented_lm import KGAugmentedLM
 
 
 class KGAugmentedLMLitModule(LightningModule):
-    """Example of a `LightningModule` for MNIST classification.
+    """A `LightningModule` that that predicts text continuation and masked 
+    nodes and edges given an source text and a partially masked knowledge graph.
 
     A `LightningModule` implements 8 key methods:
 
@@ -48,7 +49,7 @@ class KGAugmentedLMLitModule(LightningModule):
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler,
     ) -> None:
-        """Initialize a `MNISTLitModule`.
+        """Initialize a `KGAugmentedLMLitModule`.
 
         :param net: The model to train.
         :param optimizer: The optimizer to use for training.
@@ -120,7 +121,7 @@ class KGAugmentedLMLitModule(LightningModule):
             - A tensor of target labels.
         """
         x, y = batch
-        logits = self.forward(x)
+        node_embs, edge_embs, logits = self.forward(x)
         loss = self.criterion(logits, y)
         preds = torch.argmax(logits, dim=1)
         return loss, preds, y
@@ -140,8 +141,10 @@ class KGAugmentedLMLitModule(LightningModule):
         # update and log metrics
         self.train_loss(loss)
         self.train_acc(preds, targets)
+        self.train_bleu(preds, targets)
         self.log("train/loss", self.train_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log("train/acc", self.train_acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("train/bleu", self.train_bleu, on_step=False, on_epoch=True, prog_bar=True)
 
         # return loss or backpropagation will fail
         return loss
@@ -162,8 +165,10 @@ class KGAugmentedLMLitModule(LightningModule):
         # update and log metrics
         self.val_loss(loss)
         self.val_acc(preds, targets)
+        self.val_bleu(preds, targets)
         self.log("val/loss", self.val_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val/acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val/bleu", self.val_bleu, on_step=False, on_epoch=True, prog_bar=True)
 
     def on_validation_epoch_end(self) -> None:
         "Lightning hook that is called when a validation epoch ends."
@@ -189,12 +194,17 @@ class KGAugmentedLMLitModule(LightningModule):
         # update and log metrics
         self.test_loss(loss)
         self.test_acc(preds, targets)
+        self.test_bleu(preds, targets)
         self.log("test/loss", self.test_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log("test/acc", self.test_acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("test/bleu", self.test_bleu, on_step=False, on_epoch=True, prog_bar=True)
 
     def on_test_epoch_end(self) -> None:
         """Lightning hook that is called when a test epoch ends."""
         pass
+    
+    def predict_step(self, batch) -> Any:
+        return self.net(batch)
 
     def configure_optimizers(self) -> Dict[str, Any]:
         """Configures optimizers and learning-rate schedulers to be used for training.
