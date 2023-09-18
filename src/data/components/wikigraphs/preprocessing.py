@@ -124,6 +124,7 @@ def build_wikitext_vocab(data_dir):
     
     
 def build_graph_vocab(data_dir, version, threshold):
+    #TODO build separate vocab for nodes and edges
     """Build vocabulary for graph data."""
     output_path = f'{data_dir}/graph-vocab.csv'
     if not os.path.isfile(output_path):

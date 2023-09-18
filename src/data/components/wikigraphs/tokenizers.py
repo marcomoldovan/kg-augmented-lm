@@ -75,7 +75,7 @@ class WordTokenizer(Tokenizer):
       vocab = [w for w, _ in r]
 
     # Add pad and bos tokens to the vocab
-    to_add = ['<pad>', '<bos>']
+    to_add = ['<pad>', '<bos>', '<eos>', '<mask>', '<unk>']
     if '<unk>' not in vocab:
       to_add.append('<unk>')
     vocab = to_add + vocab
@@ -84,9 +84,11 @@ class WordTokenizer(Tokenizer):
     self._t2i = {t: i for i, t in enumerate(vocab)}
     self._i2t = {i: t for t, i in self._t2i.items()}
 
-    self._unk_token = self._t2i['<unk>']
-    self._bos_token = self._t2i['<bos>']
     self._pad_token = self._t2i['<pad>']
+    self._bos_token = self._t2i['<bos>']
+    self._eos_token = self._t2i['<eos>']
+    self._mask_token = self._t2i['<mask>']
+    self._unk_token = self._t2i['<unk>']
 
   @property
   def vocab_size(self):
@@ -116,9 +118,18 @@ class WordTokenizer(Tokenizer):
 
   def pad_token(self):
     return self._pad_token
-
+  
   def bos_token(self):
     return self._bos_token
+  
+  def eos_token(self):
+    return self._eos_token
+  
+  def mask_token(self):
+    return self._mask_token
+
+  def unk_token(self):
+    return self._unk_token
   
   def sentence_delimiters(self):
     return self.encode('. ! ?')
@@ -136,15 +147,17 @@ class GraphTokenizer:
     content = utils.read_txt_file(vocab_file, encoding='utf-16')
 
     vocab = content.split('\n')
-    vocab = ['<pad>', '<bos>', '<unk>'] + vocab
+    vocab = ['<pad>', '<bos>', '<eos>', '<mask>', '<unk>'] + vocab
 
     # token-index mappings
     self._t2i = {t: i for i, t in enumerate(vocab)}
     self._i2t = {i: t for t, i in self._t2i.items()}
 
-    self._unk_token = self._t2i['<unk>']
-    self._bos_token = self._t2i['<bos>']
     self._pad_token = self._t2i['<pad>']
+    self._bos_token = self._t2i['<bos>']
+    self._eos_token = self._t2i['<eos>']
+    self._mask_token = self._t2i['<mask>']
+    self._unk_token = self._t2i['<unk>']
 
   @property
   def vocab_size(self):
@@ -200,6 +213,15 @@ class GraphTokenizer:
 
   def pad_token(self):
     return self._pad_token
-
+  
   def bos_token(self):
     return self._bos_token
+  
+  def eos_token(self):
+    return self._eos_token
+  
+  def mask_token(self):
+    return self._mask_token
+
+  def unk_token(self):
+    return self._unk_token

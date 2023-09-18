@@ -218,10 +218,4 @@ class WikigraphsDataModule(LightningDataModule):
 
 
 if __name__ == "__main__":
-    # _ = WikigraphsDataModule()
-    
-    dm = WikigraphsDataModule(batch_size=4)
-    dm.prepare_data()
-    dm.setup('fit')
-    batch = next(iter(dm.train_dataloader()))
-    print(batch)
+    _ = WikigraphsDataModule()

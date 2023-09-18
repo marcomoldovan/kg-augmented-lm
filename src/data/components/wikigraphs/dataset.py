@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 import src.data.components.wikigraphs.utils as utils
 from src.data.components.wikigraphs.tokenizers import WordTokenizer, GraphTokenizer
+from src.data.components.token_masking import mask_nodes_and_adj
 
 class Graph:
     """A convenience class for representing graphs."""
@@ -548,13 +549,20 @@ class WikigraphDataset(torch.utils.data.Dataset):
         node_features = torch.stack(nodes, dim=0)
         adj_mats = torch.stack(adj_mats, dim=0)
         
+        masked_nodes, node_masks, masked_adj, adj_masks = mask_nodes_and_adj(
+            node_features, adj_mats, self._pad_value)
+        
         return dict(
             input_seq=input_seq,
             input_attention_masks=input_attention_masks,
             target_seq=target_seq,
             target_attention_masks=target_attention_masks, 
             node_features=node_features, 
-            adj_mats=adj_mats)
+            masked_nodes_features=masked_nodes,
+            node_masks=node_masks,
+            adj_mats=adj_mats,
+            masked_adj_mats=masked_adj,
+            adj_masks=adj_masks)
         
   
     def return_faux_batch(self) -> Dict[str, np.ndarray]:
