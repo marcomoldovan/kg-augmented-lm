@@ -4,12 +4,14 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 from lightning import LightningDataModule
-from torch.utils.data import ConcatDataset, DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset
 
 from src.data.components.wikigraphs.dataset import WikigraphDataset
 from src.data.components.wikigraphs.preprocessing import build_wikitext_vocab, build_graph_vocab, build_text_vocab, pair_graphs_with_wikitext
 
-class Wikidata5mDataModule(LightningDataModule):
+
+
+class Wikidata5mDataModule(LightningDataModule): # https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.data.lightning.LightningDataset.html
     """`LightningDataModule` for the WikiGraphs dataset.
 
     A `LightningDataModule` implements 7 key methods:
