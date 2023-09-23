@@ -148,12 +148,12 @@ class MultimodalBottleneckTransformer(nn.Module):
         for lyr in range(self.num_layers):
             encoders = {}
 
-            encoders['rgb'] = self.encoders[f'encoder_{lyr}']
+            encoders['text'] = self.encoders[f'encoder_{lyr}']
 
             for modality in self.modality_fusion:
-                if modality != 'rgb':
+                if modality != 'text':
                     if self.share_encoder:
-                        encoders[modality] = encoders['rgb']
+                        encoders[modality] = encoders['text']
                     else:
                         encoders[modality] = self.encoders[f'encoder_{lyr}_{modality}']
 
@@ -186,7 +186,7 @@ class MultimodalBottleneckTransformer(nn.Module):
                             for modality in self.modality_fusion:
                                 x_combined.append(x[modality])
                             x_combined = torch.cat(x_combined, dim=1)
-                        x_combined = encoders['rgb'](x_combined, deterministic=not train)
+                        x_combined = encoders['text'](x_combined, deterministic=not train)
 
         if x_combined is not None:
             x_out = x_combined
