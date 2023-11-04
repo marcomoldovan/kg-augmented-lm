@@ -1,18 +1,23 @@
+import sys
 import os
-import subprocess
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
 from typing import Any, Dict, Optional, Tuple
 
-import torch
 from lightning import LightningDataModule
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, random_split
 
-from src.data.components.wikigraphs.dataset import WikigraphDataset
-from src.data.components.wikigraphs.preprocessing import build_wikitext_vocab, build_graph_vocab, build_text_vocab, pair_graphs_with_wikitext
+
+from src.data.components.wikidata5m.dataset import Wikidata5MDataset
+import src.data.components.wikidata5m.download as download
+from src.data.components.entity_linker import EntityLinker
+from src.data.components.graph_processor import GraphProcessor
 
 
 
 class Wikidata5mDataModule(LightningDataModule): # https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.data.lightning.LightningDataset.html
-    """`LightningDataModule` for the WikiGraphs dataset.
+    """`LightningDataModule` for the Wikidata5m dataset.
 
     A `LightningDataModule` implements 7 key methods:
 
@@ -51,10 +56,15 @@ class Wikidata5mDataModule(LightningDataModule): # https://pytorch-geometric.rea
 
     def __init__(
         self,
-        data_dir: str = "data/",
-        version: str = "max256",
-        train_val_test_split: Tuple[int, int, int] = (55_000, 5_000, 10_000),
+        data_dir: str = "data/wikidata5m",
+        use_entity_embeddings: bool = False,
+        train_val_test_split: Tuple[float, float, float] = (0.8, 0.1, 0.1),
         batch_size: int = 64,
+        k_hop: int = 2,
+        max_nodes: int = 256,
+        timestep: int = 128,
+        chunk_documents: bool = True,
+        split_into_src_tgt: bool = True,
         num_workers: int = 0,
         pin_memory: bool = False,
     ) -> None:
@@ -72,9 +82,13 @@ class Wikidata5mDataModule(LightningDataModule): # https://pytorch-geometric.rea
         # also ensures init params will be stored in ckpt
         self.save_hyperparameters(logger=False)
 
-        self.data_train: Optional[Dataset] = None
-        self.data_val: Optional[Dataset] = None
-        self.data_test: Optional[Dataset] = None
+        self.data_train: Optional[Wikidata5MDataset] = None
+        self.data_val: Optional[Wikidata5MDataset] = None
+        self.data_test: Optional[Wikidata5MDataset] = None
+        
+        self.entity_linker: EntityLinker = None
+        self.graph_processor: GraphProcessor = None
+        self.tokenizer = None
 
 
     def prepare_data(self) -> None:
@@ -85,56 +99,8 @@ class Wikidata5mDataModule(LightningDataModule): # https://pytorch-geometric.rea
 
         Do not use it to assign state (self.x = y).
         """
-        #TODO implement checks if all these files are already present
-        BASE_DIR = self.hparams.data_dir
-
-        # wikitext-103
-        TARGET_DIR = os.path.join(BASE_DIR, 'wikitext-103')
-        os.makedirs(TARGET_DIR, exist_ok=True)
-        subprocess.run(['wget', 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-v1.zip', '-P', TARGET_DIR])
-        subprocess.run(['unzip', os.path.join(TARGET_DIR, 'wikitext-103-v1.zip'), '-d', TARGET_DIR])
-        subprocess.run(['mv', os.path.join(TARGET_DIR, 'wikitext-103', '*'), TARGET_DIR])
-        # Remove the extracted files and zip
-        subprocess.run(['rm', '-rf', os.path.join(TARGET_DIR, 'wikitext-103'), os.path.join(TARGET_DIR, 'wikitext-103-v1.zip')])
-
-        # wikitext-103-raw
-        TARGET_DIR = os.path.join(BASE_DIR, 'wikitext-103-raw')
-        os.makedirs(TARGET_DIR, exist_ok=True)
-        subprocess.run(['wget', 'https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-raw-v1.zip', '-P', TARGET_DIR])
-        subprocess.run(['unzip', os.path.join(TARGET_DIR, 'wikitext-103-raw-v1.zip'), '-d', TARGET_DIR])
-        subprocess.run(['mv', os.path.join(TARGET_DIR, 'wikitext-103-raw', '*'), TARGET_DIR])
-        # Remove the extracted files and zip
-        subprocess.run(['rm', '-rf', os.path.join(TARGET_DIR, 'wikitext-103-raw'), os.path.join(TARGET_DIR, 'wikitext-103-raw-v1.zip')])
-
-        # processed freebase graphs
-        FREEBASE_TARGET_DIR = self.hparams.data_dir
-        os.makedirs(os.path.join(FREEBASE_TARGET_DIR, 'packaged'), exist_ok=True)
-        subprocess.run(['wget', '--no-check-certificate', 'https://docs.google.com/uc?export=download&id=1uuSS2o72dUCJrcLff6NBiLJuTgSU-uRo', '-O', os.path.join(FREEBASE_TARGET_DIR, 'packaged', 'max256.tar')])
-        subprocess.run(['wget', '--no-check-certificate', 'https://docs.google.com/uc?export=download&id=1nOfUq3RUoPEWNZa2QHXl2q-1gA5F6kYh', '-O', os.path.join(FREEBASE_TARGET_DIR, 'packaged', 'max512.tar')])
-        subprocess.run(['wget', '--no-check-certificate', 'https://docs.google.com/uc?export=download&id=1uuJwkocJXG1UcQ-RCH3JU96VsDvi7UD2', '-O', os.path.join(FREEBASE_TARGET_DIR, 'packaged', 'max1024.tar')])
-
-        for version in ['max1024', 'max512', 'max256']:
-            output_dir = os.path.join(FREEBASE_TARGET_DIR, 'freebase', version)
-            os.makedirs(output_dir, exist_ok=True)
-            subprocess.run(['tar', '-xvf', os.path.join(FREEBASE_TARGET_DIR, 'packaged', f'{version}.tar'), '-C', output_dir])
-
-        # Remove the packaged files
-        subprocess.run(['rm', '-rf', os.path.join(FREEBASE_TARGET_DIR, 'packaged')])
+        download.download_wikidata_dataset(self.hparams.data_dir)
         
-        # Build and store the vocab for WikiText-103
-        build_wikitext_vocab(self.hparams.data_dir, self.hparams.vocab_file_path) #TODO ehat is vocab_file_path?
-        
-        # Pair articels with a Freebase subgraph
-        freebase_dir = os.path.join(FREEBASE_TARGET_DIR, 'freebase', self.hparams.version)
-        output_dir = os.path.join(BASE_DIR, 'wikigraphs', self.hparams.version)
-        for subset in ['train', 'valid', 'test']:
-            pair_graphs_with_wikitext(subset, freebase_dir, output_dir)
-            
-        # Build vocab for the graph data
-        build_graph_vocab() #TODO add params
-        
-        # Build vocab for the text data
-        build_text_vocab() #TODO add params
 
     def setup(self, stage: Optional[str] = None) -> None:
         """Load data. Set variables: `self.data_train`, `self.data_val`, `self.data_test`.
@@ -146,11 +112,26 @@ class Wikidata5mDataModule(LightningDataModule): # https://pytorch-geometric.rea
 
         :param stage: The stage to setup. Either `"fit"`, `"validate"`, `"test"`, or `"predict"`. Defaults to ``None``.
         """
-        # load and split datasets only if not loaded already
-        if not self.data_train and not self.data_val and not self.data_test:
-            self.data_train : WikigraphDataset = WikigraphDataset()
-            self.data_val : WikigraphDataset = WikigraphDataset()
-            self.data_test : WikigraphDataset = WikigraphDataset()
+        self.entity_linker = EntityLinker(self.hparams.data_dir, self.hparams.use_entity_embeddings)
+        
+        self.graph_processor = GraphProcessor(self.hparams.data_dir)
+        
+        # dataset = Wikidata5MDataset(
+        #     self.hparams.data_dir, 
+        #     self.entity_linker, 
+        #     self.graph_processor, 
+        #     self.tokenizer, 
+        #     self.hparams.k_hop, 
+        #     self.hparams.max_nodes, 
+        #     self.hparams.timestep, 
+        #     self.hparams.chunk_documents,
+        #     self.hparams.split_into_src_tgt)
+                
+        # # load and split datasets only if not loaded already
+        # if not self.data_train and not self.data_val and not self.data_test:
+        #     self.data_train, self.data_val, self.data_test = random_split(
+        #         dataset, self.hparams.train_val_test_split
+        #     )
 
     def train_dataloader(self) -> DataLoader[Any]:
         """Create and return the train dataloader.
@@ -220,4 +201,15 @@ class Wikidata5mDataModule(LightningDataModule): # https://pytorch-geometric.rea
 
 
 if __name__ == "__main__":
-    _ = Wikidata5mDataModule()
+    # _ = Wikidata5mDataModule()
+    
+    dm = Wikidata5mDataModule()
+    dm.setup()
+
+    from time import time
+    
+    start = time()
+    entities = dm.entity_linker.link_entities("The Monumentum Ancyranum (Latin 'Monument of Ancyra') or Temple of Augustus and Rome in Ancyra is an Augusteum in Ankara (ancient Ancyra), Turkey. The text of the Res Gestae Divi Augusti ('Deeds of the Divine Augustus') is inscribed on its walls, and is the most complete copy of that text. The temple is adjacent to the Hadji Bairam Mosque in the Ulus quarter.")
+    subgraph = dm.graph_processor.get_subgraph_for_entities(entities, 2, 256)
+    
+    print(f"Retrieving entities and subgraph took {time() - start} seconds.")
