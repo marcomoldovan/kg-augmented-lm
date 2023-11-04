@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from src.data.wikigraphs_datamodule import WikigraphsDataModule
-from src.data.wikidata5m_datamodule import Wikidata5mDataModule
+# from src.data.wikidata5m_datamodule import Wikidata5mDataModule
 
 # pytest tests/test_datamodules.py
 

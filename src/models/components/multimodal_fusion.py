@@ -65,20 +65,21 @@ class MultimodalBottleneckTransformer(nn.Module):
     def __init__(
         self, 
         latent_dim, 
-        mlp_dim, 
         num_layers, 
         num_heads, 
+        mlp_widen_factor=4, 
         dropout_rate=0.1,
         attention_dropout_rate=0.1, 
         stochastic_droplayer_rate=0.0,
-        modality_fusion=('nodes', 'edges', 'text'), 
+        modality_fusion=('nodes', 'text'), 
         fusion_layer=0,
+        bottleneck_width=4,
         use_bottleneck=True,
         share_encoder=False):
         super(MultimodalBottleneckTransformer, self).__init__()
         
         self.latent_dim = latent_dim
-        self.mlp_dim = mlp_dim
+        self.mlp_dim = mlp_widen_factor
         self.num_heads = num_heads
 
         self.num_layers = num_layers
@@ -88,12 +89,14 @@ class MultimodalBottleneckTransformer(nn.Module):
         self.share_encoder = share_encoder
 
         self.encoders = nn.ModuleDict()
+        
+        self.bottleneck = nn.Embedding(bottleneck_width, latent_dim) if use_bottleneck else None
 
         for lyr in range(num_layers):
             droplayer_p = (lyr / max(num_layers - 1, 1)) * stochastic_droplayer_rate
             encoder_block = MBTEncoderBlock(
                 latent_dim=latent_dim,
-                mlp_dim=mlp_dim,
+                mlp_dim=latent_dim * mlp_widen_factor,
                 num_heads=num_heads,
                 dropout_rate=dropout_rate,
                 attention_dropout_rate=attention_dropout_rate,
@@ -106,7 +109,7 @@ class MultimodalBottleneckTransformer(nn.Module):
                 for modality in self.modality_fusion:
                     self.encoders[f'encoder_{lyr}_{modality}'] = MBTEncoderBlock(
                         latent_dim=latent_dim,
-                        mlp_dim=mlp_dim,
+                        mlp_dim=latent_dim * mlp_widen_factor,
                         num_heads=num_heads,
                         dropout_rate=dropout_rate,
                         attention_dropout_rate=attention_dropout_rate,
@@ -135,7 +138,14 @@ class MultimodalBottleneckTransformer(nn.Module):
         x_combined = torch.cat(other_modalities, dim=1)
         return x_combined, num_tokens
 
-    def forward(self, x: dict, bottleneck: torch.Tensor, train: bool):
+    def forward(self, x: dict, train: bool):
+        # Extract bottleneck tensor from the embedding layer
+        if self.use_bottleneck:
+            batch_size = x['text'].shape[0]
+            bottleneck = self.bottleneck.weight.unsqueeze(0).repeat(batch_size, 1, 1)
+        else:
+            None
+        
         # Add positional embeddings
         for modality in self.modality_fusion:
             if modality == 'text':

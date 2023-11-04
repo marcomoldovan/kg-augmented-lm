@@ -129,7 +129,6 @@ class GraphTransformer(nn.Module):
         edge_dim = None,
         num_edge_types = 1,
         heads = 8,
-        gated_residual = True,
         with_feedforwards = False,
         norm_edges = False,
         rel_pos_emb = False,
@@ -169,7 +168,7 @@ class GraphTransformer(nn.Module):
             edges = self.norm_edges(edges)
 
         if exists(adj_mat):
-            assert adj_mat.shape == (batch, seq, seq)
+            assert adj_mat.shape == (batch, seq, seq), f'adjacency matrix must have shape ({batch}, {seq}, {seq}) but has shape {adj_mat.shape}'
             assert exists(self.adj_emb), 'accept_adjacency_matrix must be set to True'
             adj_mat = self.adj_emb(adj_mat.long())
 
@@ -183,4 +182,4 @@ class GraphTransformer(nn.Module):
                 ff, ff_residual = ff_block
                 nodes = ff_residual(ff(nodes), nodes)
 
-        return nodes, edges
+        return nodes, all_edges

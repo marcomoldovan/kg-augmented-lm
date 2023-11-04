@@ -121,10 +121,21 @@ class KGAugmentedLMLitModule(LightningModule):
             - A tensor of target labels.
         """
         x, y = batch
-        node_embs, edge_embs, logits = self.forward(x)
-        loss = self.criterion(logits, y)
-        preds = torch.argmax(logits, dim=1)
-        return loss, preds, y
+        node_logits, text_logits, text_target = self.forward(x)
+        
+        nodes_target = batch['node_features']
+        nodes_target_maseked = nodes_target[batch['node_masks']]
+        nodes_logits_masked = node_logits[batch['node_masks']]
+        
+        node_loss = self.criterion(nodes_logits_masked, nodes_target_maseked)
+        
+        text_loss = self.criterion(text_logits, text_target)
+                
+        return (node_loss, text_loss), (node_logits, text_logits), (nodes_target, text_target)
+    
+    def prepare_preds_and_targets(self, preds, targets):
+        # prepare preds and targets for metric calculation
+        pass
 
     def training_step(
         self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int
@@ -136,10 +147,10 @@ class KGAugmentedLMLitModule(LightningModule):
         :param batch_idx: The index of the current batch.
         :return: A tensor of losses between model predictions and targets.
         """
-        loss, preds, targets = self.model_step(batch)
+        losses, preds, targets = self.model_step(batch)
 
         # update and log metrics
-        self.train_loss(loss)
+        self.train_loss(sum(losses))
         self.train_acc(preds, targets)
         self.train_bleu(preds, targets)
         self.log("train/loss", self.train_loss, on_step=False, on_epoch=True, prog_bar=True)
@@ -147,7 +158,7 @@ class KGAugmentedLMLitModule(LightningModule):
         self.log("train/bleu", self.train_bleu, on_step=False, on_epoch=True, prog_bar=True)
 
         # return loss or backpropagation will fail
-        return loss
+        return (losses)
 
     def on_train_epoch_end(self) -> None:
         "Lightning hook that is called when a training epoch ends."
