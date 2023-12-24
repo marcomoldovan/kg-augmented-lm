@@ -1,10 +1,3 @@
-import sys
-import os
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-
-
-from typing import Union
 import torch
 from torch import nn
 
@@ -32,15 +25,15 @@ class KGAugmentedLM(nn.Module):
     def __init__(
         self, 
         latent_dim: int = 128, 
-        num_unimodal_encoder_layers: int = 2, 
+        num_unimodal_encoder_layers: int = 2,
         num_unimodal_encoder_heads: int = 2, 
         fusion_model: str = 'bottleneck',
         bottleneck_width: int = 4,
         num_fusion_layers: int = 2, 
         num_fusion_heads: int = 2,
-        graph_vocab_size: int = 8192, 
-        num_edge_types: int = 256,
-        text_vocab_size: int = 32768, 
+        graph_vocab_size: int = 31090, 
+        num_edge_types: int = 522,
+        text_vocab_size: int = 30522, 
         modality_encoding: str = 'sinusoidal',):
         super().__init__()
         
@@ -121,16 +114,17 @@ class KGAugmentedLM(nn.Module):
     def forward(
         self,
         src_ids, 
-        src_attention_mask, 
-        trg_ids, 
-        trg_attention_mask,
-        node_ids, 
-        adj_mat, 
-        node_mask,
-        train=True):
+        src_attention_mask=None, 
+        trg_ids=None, 
+        trg_attention_mask=None,
+        node_ids=None, 
+        adj_mat=None, 
+        node_mask=None,
+        mode='train',
+        max_length=128):
 
-        if train:
-            return self.train_step(
+        if mode in ['train', 'val', 'test']:
+            return self.train_val_test_step(
                 src_ids, 
                 src_attention_mask, 
                 trg_ids, 
@@ -138,18 +132,17 @@ class KGAugmentedLM(nn.Module):
                 node_ids, 
                 adj_mat, 
                 node_mask,)
-        else:
+        elif mode == 'predict':
             return self.predict_step(
                 src_ids, 
                 src_attention_mask, 
-                trg_ids, 
-                trg_attention_mask,
                 node_ids, 
                 adj_mat, 
-                node_mask,)
+                node_mask,
+                max_length=max_length)
         
     
-    def train_step(
+    def train_val_test_step(
         self, 
         src_ids, 
         src_attention_mask, 
@@ -162,6 +155,9 @@ class KGAugmentedLM(nn.Module):
         # Shift trg_ids to create decoder input and target
         trg_input = trg_ids[:, :-1]
         text_target = trg_ids[:, 1:]
+        
+        # Adjust trg_attention_mask to match the dimensions of trg_input
+        trg_attention_mask = trg_attention_mask[:, :-1] if trg_attention_mask.size(1) > 1 else None
         
         # embeddings
         node_emb = self.node_emb(node_ids)
@@ -183,11 +179,15 @@ class KGAugmentedLM(nn.Module):
         graph_dec_out = self.graph_transformer_decoder(graph_dec_in, src_key_padding_mask=node_mask)
         node_logits = self.node_predictor(graph_dec_out.permute(1, 0, 2))
         
+        # Prepare causal mask for text generation
+        seq_len = trg_input.size(1)  # trg_input has shape [batch_size, seq_len]
+        tgt_mask = nn.Transformer.generate_square_subsequent_mask(seq_len)
+
         # Predict text continuation
-        #?idea: force model to predict node id after every mention of a node. Increase factuality? <- this is a data problem, not a model problem.
         decoder_out = self.text_transformer_decoder(
-            trg_emb, 
-            fusion_emb.permute(1, 0, 2), 
+            tgt=trg_emb, 
+            memory=fusion_emb.permute(1, 0, 2), 
+            tgt_mask=tgt_mask,
             tgt_is_causal=True,
             tgt_key_padding_mask=trg_attention_mask)
         text_logits = self.text_fc_out(decoder_out.permute(1, 0, 2))
@@ -202,21 +202,29 @@ class KGAugmentedLM(nn.Module):
             node_ids, 
             adj_mat, 
             node_mask,
-            max_length=100):
+            max_length):
         
         # Initial token for autoregressive generation (e.g., start token)
-        start_token_id = ...  #TODO Define appropriately
-        trg_ids = torch.tensor([[start_token_id]], device=src_ids.device)
+        batch_size = src_ids.size(0)
+        start_token_id = 1 
+        end_token_id = 2
         
-        trg_attention_mask = torch.ones((1, 1), dtype=torch.bool)
+        # Initialize trg_ids for the batch
+        trg_ids = torch.full((batch_size, 1), start_token_id, device=src_ids.device)
+
+        # Initialize trg_attention_mask for the start token
+        trg_attention_mask = torch.ones((1, 1), device=src_ids.device).bool()
+        
+        # Initialize a mask to track active sequences (not yet ended)
+        active_sequences = torch.ones(batch_size, dtype=torch.bool, device=src_ids.device)
         
         # embeddings
         node_emb = self.node_emb(node_ids)
-        src_emb = self.pos_enc(self.text_emb(src_ids))
+        src_emb = self.pos_enc(self.text_emb(src_ids)).permute(1, 0, 2)
         
         # unimodal encoding
-        node_emb, _ = self.graph_transformer_encoder(node_emb, adj_mat, node_mask)
-        src_emb = self.text_transformer_encoder(src_emb, src_attention_mask)
+        node_emb, _ = self.graph_transformer_encoder(nodes=node_emb, adj_mat=adj_mat, mask=node_mask)
+        src_emb = self.text_transformer_encoder(src=src_emb, src_key_padding_mask=src_attention_mask).permute(1, 0, 2)
         
         # multimodal fusion
         if self.fusion_type == 'bottleneck':
@@ -228,65 +236,35 @@ class KGAugmentedLM(nn.Module):
         generated_text_ids = []
         for _ in range(max_length):
             trg_emb = self.pos_enc(self.text_emb(trg_ids))
-            trg_attention_mask = torch.cat([trg_attention_mask, torch.ones((1, 1), dtype=torch.bool)], dim=0)
+            seq_len = trg_ids.size(1)
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(sz=seq_len)
+            
+            # Update trg_key_padding_mask based on active_sequences
+            trg_attention_mask = ~active_sequences.unsqueeze(1).expand(-1, seq_len)
+            
             decoder_out = self.text_transformer_decoder(
-                trg_emb, 
-                fusion_emb.permute(1, 0, 2), 
+                tgt=trg_emb.permute(1, 0, 2), 
+                memory=fusion_emb.permute(1, 0, 2), 
+                tgt_mask=tgt_mask,
                 tgt_is_causal=True, 
                 tgt_key_padding_mask=trg_attention_mask
             )
             
             # Extract the predicted token (typically, the token with the highest probability)
-            next_token_id = decoder_out.argmax(dim=2)[:, -1].unsqueeze(1)
+            next_token_id = decoder_out.argmax(dim=2)[-1, :].unsqueeze(1)
             trg_ids = torch.cat([trg_ids, next_token_id], dim=1)
-            trg_attention_mask = torch.cat([trg_attention_mask, torch.ones((1, 1),dtype=torch.bool)], dim=0)
+            
+            # Update the trg_attention_mask to include the new token
+            trg_attention_mask = torch.cat([trg_attention_mask, torch.ones((batch_size, 1),dtype=torch.bool)], dim=1)
+            
+            # Update active sequences (mark as False if end token is generated)
+            active_sequences &= (next_token_id.squeeze(-1) != end_token_id)
+
+            # Optionally break if all sequences are inactive
+            if not active_sequences.any():
+                break
             
             generated_text_ids.append(next_token_id)
+            
 
         return torch.cat(generated_text_ids, dim=1)
-
-
-
-
-from src.data.components.token_masking import mask_nodes_and_adj
-
-def return_faux_batch(batch_size, timesteps, text_vocab_size, graph_vocab_size, num_edge_types, pad_value):
-    """Return a fake batch with the right shapes and dimensions."""
-    input_seq = torch.randint(
-        low=0, high=text_vocab_size, size=(batch_size, timesteps))
-    input_attention_masks = torch.ones(
-        (batch_size, timesteps), dtype=torch.float32)
-    target_seq = torch.randint(
-        low=0, high=text_vocab_size, size=(batch_size, timesteps))
-    target_attention_masks = torch.ones(
-        (batch_size, timesteps), dtype=torch.float32)
-    node_features = torch.randint(
-        low=0, high=graph_vocab_size, size=(batch_size, timesteps))
-    adj_mats = torch.randint(
-        low=0, high=num_edge_types, size=(batch_size, timesteps, timesteps))
-    masked_nodes, node_masks, masked_adj, adj_masks = mask_nodes_and_adj(
-        node_features, adj_mats, pad_value)
-
-    return dict(
-        input_seq=input_seq,
-        input_attention_masks=input_attention_masks,
-        target_seq=target_seq,
-        target_attention_masks=target_attention_masks, 
-        node_features=node_features, 
-        masked_nodes_features=masked_nodes,
-        node_masks=node_masks,
-        adj_mats=adj_mats,
-        masked_adj_mats=masked_adj,
-        adj_masks=adj_masks)
-    
-
-input = return_faux_batch(32, 64, 32768, 8192, 256, 0)
-model = KGAugmentedLM()
-out = model(src_ids=input['input_seq'], 
-            src_attention_mask=input['input_attention_masks'],
-            trg_ids=input['target_seq'],
-            trg_attention_mask=input['target_attention_masks'],
-            node_ids=input['node_features'], #!
-            adj_mat=input['adj_mats'], #!
-            node_mask=input['node_masks'],
-            train=True)

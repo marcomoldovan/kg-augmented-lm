@@ -93,11 +93,11 @@ class KGAugmentedLMLitModule(LightningModule):
         self.val_acc.reset()
         self.val_acc_best.reset()
         
-        msg = """
+        msg = f"""
             The attribute vocab_size of the text and/or graph encoder must match num_embeddings \
-            in the text_emb and/or node_emb layer of KGAugmentedLM.
+            in the text_emb and/or node_emb layer of KGAugmentedLM. \
         """
-        assert self.trainer.datamodule.text_vocab_size == self.net.text_emb.num_embeddings, msg
+        assert len(self.trainer.datamodule.word_tokenizer) == self.net.text_emb.num_embeddings, msg
         assert self.trainer.datamodule.graph_vocab_size == self.net.node_emb.num_embeddings, msg
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -106,7 +106,16 @@ class KGAugmentedLMLitModule(LightningModule):
         :param x: A tensor of images.
         :return: A tensor of logits.
         """
-        return self.net(x)
+        return self.net(
+            src_ids=x['input_seq'], 
+            src_attention_mask=x['input_attention_masks'],
+            trg_ids=x['target_seq'],
+            trg_attention_mask=x['target_attention_masks'],
+            node_ids=x['masked_nodes_features'],
+            adj_mat=x['adj_mats'], #? or x['masked_adj_mats']
+            node_mask=x['node_masks'],
+            mode=x['mode'],
+        )
 
     def model_step(
         self, batch: Tuple[torch.Tensor, torch.Tensor]
@@ -120,14 +129,15 @@ class KGAugmentedLMLitModule(LightningModule):
             - A tensor of predictions.
             - A tensor of target labels.
         """
-        x, y = batch
-        node_logits, text_logits, text_target = self.forward(x)
+        node_logits, text_logits, text_target = self.forward(batch)
         
         nodes_target = batch['node_features']
-        nodes_target_maseked = nodes_target[batch['node_masks']]
-        nodes_logits_masked = node_logits[batch['node_masks']]
+        nodes_mask = batch['node_masks']
         
-        node_loss = self.criterion(nodes_logits_masked, nodes_target_maseked)
+        nodes_target_masked = nodes_target[nodes_mask]
+        nodes_logits_masked = node_logits[nodes_mask]
+        
+        node_loss = self.criterion(nodes_logits_masked, nodes_target_masked)
         
         text_loss = self.criterion(text_logits, text_target)
                 
@@ -147,6 +157,8 @@ class KGAugmentedLMLitModule(LightningModule):
         :param batch_idx: The index of the current batch.
         :return: A tensor of losses between model predictions and targets.
         """
+        batch.update({'mode': 'train'})
+        
         losses, preds, targets = self.model_step(batch)
 
         # update and log metrics
@@ -171,6 +183,8 @@ class KGAugmentedLMLitModule(LightningModule):
             labels.
         :param batch_idx: The index of the current batch.
         """
+        batch.update({'mode': 'val'})
+        
         loss, preds, targets = self.model_step(batch)
 
         # update and log metrics
@@ -200,6 +214,8 @@ class KGAugmentedLMLitModule(LightningModule):
             labels.
         :param batch_idx: The index of the current batch.
         """
+        batch.update({'mode': 'test'})
+        
         loss, preds, targets = self.model_step(batch)
 
         # update and log metrics
@@ -215,6 +231,8 @@ class KGAugmentedLMLitModule(LightningModule):
         pass
     
     def predict_step(self, batch) -> Any:
+        batch.update({'mode': 'predict'})
+        
         return self.net(batch)
 
     def configure_optimizers(self) -> Dict[str, Any]:

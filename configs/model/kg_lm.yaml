@@ -1,4 +1,4 @@
-_target_: src.models.lit_module.LitModule
+_target_: src.models.lit_module.KGAugmentedLMLitModule
 
 optimizer:
   _target_: torch.optim.Adam
@@ -15,14 +15,14 @@ scheduler:
 
 net:
   _target_: src.models.components.kg_augmented_lm.KGAugmentedLM
-  latent_dim: 128
-  num_unimodal_encoder_layers: 2
-  num_unimodal_encoder_heads: 2
+  latent_dim: 32
+  num_unimodal_encoder_layers: 1
+  num_unimodal_encoder_heads: 1
   fusion_model: 'bottleneck'
   bottleneck_width: 4
-  num_fusion_layers: 2
-  num_fusion_heads: 2
-  text_vocab_size: 32768 # wikigraphs: 32768, wikidata5m: 65536
-  graph_vocab_size: 8192 # wikigraphs: 8192, wikidata5m: 16384
-  num_edge_types: 256 # wikigraphs: 256, wikidata5m: 512
+  num_fusion_layers: 1
+  num_fusion_heads: 1
+  text_vocab_size: 50262 # gpt2 with added special tokens
+  graph_vocab_size: 31092 # wikigraphs: 31092, wikidata5m: 4594485
+  num_edge_types: 31092 # wikigraphs: 522, wikidata5m: 822 #! have to set to graph_vocab_size for wikigraphs because nodes and edges are saved in the same vocab
   modality_encoding: 'sinusoidal'
