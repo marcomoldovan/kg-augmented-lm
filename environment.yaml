@@ -42,6 +42,7 @@ dependencies:
   - nltk
   - faiss
   - marisa-trie
+  - graph-tool
 
   - pip>=23
   - pip:
