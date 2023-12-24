@@ -1,13 +1,13 @@
-import re
 import abc
 import collections
 from typing import Any, Iterator, Dict, List, Tuple, NamedTuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+from transformers import AutoTokenizer
 
 import src.data.components.wikigraphs.utils as utils
-from src.data.components.wikigraphs.tokenizers import WordTokenizer, GraphTokenizer
+from src.data.components.wikigraphs.tokenizers import GraphTokenizer
 from src.data.components.token_masking import mask_nodes_and_adj
 
 class Graph:
@@ -302,7 +302,7 @@ class ParsedDataset(Dataset):
     
 class WikigraphDataset(torch.utils.data.Dataset):
     def __init__(self,
-                 tokenizer: WordTokenizer,
+                 tokenizer: AutoTokenizer,
                  graph_tokenizer: GraphTokenizer,
                  data_dir: str = None,
                  text_only: bool = False,
@@ -323,13 +323,18 @@ class WikigraphDataset(torch.utils.data.Dataset):
         self._batch_size = batch_size
         self._timesteps = timesteps
         self._graph_feature_dim = graph_tokenizer.vocab_size
-        self._pad_value = self._tokenizer.pad_token()
         self._subsample_nodes = subsample_rate
         self._version = version 
         self._subset = subset
-        self._sentence_delimiters = self._tokenizer.sentence_delimiters()
+        self._sentence_delimiters = [delimiter[0] for delimiter in tokenizer(['.', '?', '!'])['input_ids']]
         self._max_center_split_offset = max_center_split_offset
         self._split_overlap = split_overlap
+        
+        special_token_dict = {'cls_token': '<cls>', 'sep_token': '<sep>', 'pad_token': '<pad>', 'mask_token': '<mask>', 'bos_token': '<|startoftext|>'}
+        self._tokenizer.add_special_tokens(special_token_dict)
+        # self._tokenizer.add_tokens('<|padding|>')
+        # self._tokenizer.pad_token = '<|padding|>'
+        # self._pad_value = self._tokenizer.pad_token_id
         
         allowed_versions = ('max256', 'max512', 'max1024')
         if version not in allowed_versions:
@@ -404,9 +409,13 @@ class WikigraphDataset(torch.utils.data.Dataset):
         graph: the processed graph content.
         text: the tokenized text, a sequence of token IDs.
         """
-        return (self._process_graph(pair.center_node, pair.graph),
-                self._tokenizer.encode(
-                    pair.text, prepend_bos=True, append_eos=True))
+        input_ids = self._tokenizer(
+            pair.text, 
+            return_attention_mask=False, 
+            return_token_type_ids=False
+        )['input_ids']
+        input_ids = [self._tokenizer.bos_token_id] + input_ids + [self._tokenizer.eos_token_id]
+        return (self._process_graph(pair.center_node, pair.graph), input_ids)
     
     
     def _raw_graph_to_tensor(
@@ -502,67 +511,103 @@ class WikigraphDataset(torch.utils.data.Dataset):
             return dict(graph=graph, input_seq=input_seq, target_seq=target_seq)
 
 
-    def collate_fn(self, batch): #TODO add text only functionality
-        max_seq_len = max(
-            [len(e['input_seq']) for e in batch] + [len(e['target_seq']) for e in batch])
-        max_nodes = max([e['graph'].nodes.size(0) for e in batch])
-        max_adj_mat_size = max([e['graph'].adj_mat.size(0) for e in batch])
-        
-        input_attention_masks = []
-        target_attention_masks = []
-        nodes = []
-        adj_mats = []
-        
-        for e in batch:
-            input_attn_mask = torch.zeros(max_seq_len, dtype=torch.float32)
-            input_attn_mask[:len(e['input_seq'])] = 1
-            input_attention_masks.append(input_attn_mask)
-            e['input_seq'] = F.pad(
-                torch.tensor(e['input_seq']),
-                (0, max_seq_len - e['input_seq'].shape[-1]), 
-                'constant', 
-                self._pad_value)
-            target_attention_mask = torch.zeros(max_seq_len, dtype=torch.float32)
-            target_attention_mask[:len(e['target_seq'])] = 1
-            target_attention_masks.append(target_attention_mask)
-            e['target_seq'] = F.pad(
-                torch.tensor(e['target_seq']),
-                (0, max_seq_len - e['target_seq'].shape[-1]), 
-                'constant', 
-                self._pad_value)
-            nodes.append(F.pad(
-                e['graph'].nodes,
-                (0, max_nodes - e['graph'].nodes.shape[-1]),
-                'constant', 
-                self._pad_value))
-            adj_mat = e['graph'].adj_mat
-            adj_mats.append(F.pad(
-                adj_mat, 
-                (0, max(0, max_adj_mat_size - adj_mat.size(1)), 0, max(0, max_adj_mat_size - adj_mat.size(0))),
-                'constant',
-                value=self._pad_value)[:max_adj_mat_size, :max_adj_mat_size])
+    def collate_fn(self, batch):
+        if not self._text_only:
+            max_seq_len = max(
+                [len(e['input_seq']) for e in batch] + [len(e['target_seq']) for e in batch])
+            max_nodes = max([e['graph'].nodes.size(0) for e in batch])
+            max_adj_mat_size = max([e['graph'].adj_mat.size(0) for e in batch])
             
-        input_seq = torch.stack([e['input_seq'] for e in batch], dim=0)
-        input_attention_masks = torch.stack(input_attention_masks, dim=0)
-        target_seq = torch.stack([e['target_seq'] for e in batch], dim=0)
-        target_attention_masks = torch.stack(target_attention_masks, dim=0)
-        node_features = torch.stack(nodes, dim=0)
-        adj_mats = torch.stack(adj_mats, dim=0)
-        
-        masked_nodes, node_masks, masked_adj, adj_masks = mask_nodes_and_adj(
-            node_features, adj_mats, self._pad_value)
-        
-        return dict(
-            input_seq=input_seq,
-            input_attention_masks=input_attention_masks,
-            target_seq=target_seq,
-            target_attention_masks=target_attention_masks, 
-            node_features=node_features, 
-            masked_nodes_features=masked_nodes,
-            node_masks=node_masks,
-            adj_mats=adj_mats,
-            masked_adj_mats=masked_adj,
-            adj_masks=adj_masks)
+            input_attention_masks = []
+            target_attention_masks = []
+            nodes = []
+            adj_mats = []
+            
+            for e in batch:
+                input_attn_mask = torch.zeros(max_seq_len, dtype=torch.float32)
+                input_attn_mask[:len(e['input_seq'])] = 1
+                input_attention_masks.append(input_attn_mask)
+                e['input_seq'] = F.pad(
+                    torch.tensor(e['input_seq']),
+                    (0, max_seq_len - len(e['input_seq'])), 
+                    'constant', 
+                    self._tokenizer.pad_token_id)
+                target_attention_mask = torch.zeros(max_seq_len, dtype=torch.float32)
+                target_attention_mask[:len(e['target_seq'])] = 1
+                target_attention_masks.append(target_attention_mask)
+                e['target_seq'] = F.pad(
+                    torch.tensor(e['target_seq']),
+                    (0, max_seq_len - len(e['target_seq'])), 
+                    'constant', 
+                    self._tokenizer.pad_token_id)
+                nodes.append(F.pad(
+                    e['graph'].nodes,
+                    (0, max_nodes - e['graph'].nodes.shape[-1]),
+                    'constant', 
+                    self._graph_tokenizer.pad_token()))
+                adj_mat = e['graph'].adj_mat
+                adj_mats.append(F.pad(
+                    adj_mat, 
+                    (0, max(0, max_adj_mat_size - adj_mat.size(1)), 0, max(0, max_adj_mat_size - adj_mat.size(0))),
+                    'constant',
+                    value=self._graph_tokenizer.pad_token())[:max_adj_mat_size, :max_adj_mat_size])
+                
+            input_seq = torch.stack([e['input_seq'] for e in batch], dim=0)
+            input_attention_masks = torch.stack(input_attention_masks, dim=0)
+            target_seq = torch.stack([e['target_seq'] for e in batch], dim=0)
+            target_attention_masks = torch.stack(target_attention_masks, dim=0)
+            node_features = torch.stack(nodes, dim=0)
+            adj_mats = torch.stack(adj_mats, dim=0)
+            
+            masked_nodes, node_masks, masked_adj, adj_masks = mask_nodes_and_adj(
+                node_features, adj_mats, self._graph_tokenizer.pad_token())
+            
+            return dict(
+                input_seq=input_seq,
+                input_attention_masks=input_attention_masks,
+                target_seq=target_seq,
+                target_attention_masks=target_attention_masks, 
+                node_features=node_features.int(), 
+                masked_nodes_features=masked_nodes.int(),
+                node_masks=node_masks,
+                adj_mats=adj_mats,
+                masked_adj_mats=masked_adj,
+                adj_masks=adj_masks)
+        else:
+            max_seq_len = max(
+                [len(e['input_seq']) for e in batch] + [len(e['target_seq']) for e in batch])
+            
+            input_attention_masks = []
+            target_attention_masks = []
+            
+            for e in batch:
+                input_attn_mask = torch.zeros(max_seq_len, dtype=torch.float32)
+                input_attn_mask[:len(e['input_seq'])] = 1
+                input_attention_masks.append(input_attn_mask)
+                e['input_seq'] = F.pad(
+                    torch.tensor(e['input_seq']),
+                    (0, max_seq_len - len(e['input_seq'])), 
+                    'constant', 
+                    self._tokenizer.pad_token_id)
+                target_attention_mask = torch.zeros(max_seq_len, dtype=torch.float32)
+                target_attention_mask[:len(e['target_seq'])] = 1
+                target_attention_masks.append(target_attention_mask)
+                e['target_seq'] = F.pad(
+                    torch.tensor(e['target_seq']),
+                    (0, max_seq_len - len(e['target_seq'])), 
+                    'constant', 
+                    self._tokenizer.pad_token_id)
+                
+            input_seq = torch.stack([e['input_seq'] for e in batch], dim=0)
+            input_attention_masks = torch.stack(input_attention_masks, dim=0)
+            target_seq = torch.stack([e['target_seq'] for e in batch], dim=0)
+            target_attention_masks = torch.stack(target_attention_masks, dim=0)
+            
+            return dict(
+                input_seq=input_seq,
+                input_attention_masks=input_attention_masks,
+                target_seq=target_seq,
+                target_attention_masks=target_attention_masks)
         
   
     def return_faux_batch(self) -> Dict[str, np.ndarray]:

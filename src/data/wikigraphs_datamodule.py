@@ -7,9 +7,10 @@ from typing import Any, Dict, Optional
 
 from lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset
+from transformers import AutoTokenizer
 
 from src.data.components.wikigraphs.dataset import WikigraphDataset
-from src.data.components.wikigraphs.tokenizers import WordTokenizer, GraphTokenizer
+from src.data.components.wikigraphs.tokenizers import GraphTokenizer
 import src.data.components.wikigraphs.preprocessing as preprocessing
 import src.data.components.wikigraphs.download as download
 
@@ -85,10 +86,10 @@ class WikigraphsDataModule(LightningDataModule):
         self.data_val: Optional[Dataset] = None
         self.data_test: Optional[Dataset] = None
         
-        self.word_tokenizer: WordTokenizer = None
-        self.graph_tokenizer: GraphTokenizer = None
+        self.word_tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained('gpt2')
+        self.text_vocab_size: Optional[int] = self.word_tokenizer.vocab_size
         
-        self.text_vocab_size: Optional[int] = None
+        self.graph_tokenizer: GraphTokenizer = None
         self.graph_vocab_size: Optional[int] = None
 
     def prepare_data(self) -> None:
@@ -111,9 +112,6 @@ class WikigraphsDataModule(LightningDataModule):
         # Build vocab for the graph data
         preprocessing.build_graph_vocab(self.hparams.data_dir, self.hparams.version, self.hparams.graph_vocab_threshold)
         
-        # Build vocab for the text data
-        preprocessing.build_text_vocab(self.hparams.data_dir, self.hparams.version, self.hparams.graph_vocab_threshold) 
-
     def setup(self, stage: Optional[str] = None) -> None:
         """Load data. Set variables: `self.data_train`, `self.data_val`, `self.data_test`.
 
@@ -124,10 +122,8 @@ class WikigraphsDataModule(LightningDataModule):
 
         :param stage: The stage to setup. Either `"fit"`, `"validate"`, `"test"`, or `"predict"`. Defaults to ``None``.
         """
-        self.word_tokenizer = WordTokenizer(f'{self.hparams.data_dir}/text-vocab.csv')
+
         self.graph_tokenizer = GraphTokenizer(f'{self.hparams.data_dir}/graph-vocab.csv')
-        
-        self.text_vocab_size = self.word_tokenizer.vocab_size
         self.graph_vocab_size = self.graph_tokenizer.vocab_size
         
         kwargs = dict(
