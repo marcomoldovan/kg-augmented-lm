@@ -1,25 +1,55 @@
+
+import os
 import gzip
+import pickle
 
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
-from src.data.components.entity_linker import EntityLinker
 from src.data.components.graph_processor import GraphProcessor
 
 class Wikidata5MDataset(Dataset):
-    def __init__(self, corpus_path, entity_linker: EntityLinker, graph_processor: GraphProcessor, tokenizer, k_hop: int = 2, max_nodes: int = 256, timesteps: int = 128, chunk_documents: bool = True, split_into_src_tgt: bool = True):
-        self.el = entity_linker
-        self.gp = graph_processor
-        self.tok = tokenizer
+    def __init__(self, 
+                 data_dir: str, 
+                 corpus_version: str, 
+                 subgraph_retrieval: str = 'static', 
+                 graph_processor: GraphProcessor = None,
+                 k_hop: int = 2, 
+                 max_nodes: int = 256, 
+                 timesteps: int = 128, 
+                 chunk_documents: bool = True, 
+                 split_into_src_tgt: bool = True, 
+                 tokenizer: AutoTokenizer = None):
         
+        self.data_dir = data_dir
+        self.corpus_version = corpus_version
+        self.subgraph_retrieval = subgraph_retrieval
         self.k_hop = k_hop
         self.max_nodes = max_nodes
         self.timesteps = timesteps
         self.chunk_documents = chunk_documents
         self.split_into_src_tgt = split_into_src_tgt
+        self.tokenizer = tokenizer
         
+        corpus_path = os.path.join(data_dir, f'wikidata5m_text{corpus_version}.txt.gz')
         with gzip.open(corpus_path, 'rt') as f:
             self.corpus = f.readlines()
+            
+        if self.subgraph_retrieval == 'static':
+            subgraphs_file = f"wikidata5m_subgraphs_k-{self.k_hop}_max_nodes-{self.max_nodes}.pkl"
+            self.subgraphs_path = os.path.join(data_dir, subgraphs_file)
+            with open(self.subgraphs_path, 'rb') as f:
+                self.subgraphs = pickle.load(f)
+        elif self.subgraph_retrieval == 'dynamic':
+            self.gp = graph_processor
+        
+        if self.chunk_documents:
+            self.corpus = self._chunk_documents(self.corpus)
+            
+    
+    def _chunk_documents(self, corpus):
+        pass
+        
         
     def _split_seq_into_input_target(self, seq):
         delimiter_indices = [i for i, id in enumerate(seq) if id in self._sentence_delimiters]
@@ -48,11 +78,11 @@ class Wikidata5MDataset(Dataset):
         return len(self.corpus)
     
     def __getitem__(self, idx):
-        _, text = self.corpus[idx].strip().split('\t')
-        entities = self.el.link_entities(text)
-        subgraph = self.gp.get_subgraph_for_entities(entities, self.k_hop, self.max_nodes)
-        
-        # if self.split_text
+        id, text = self.corpus[idx].strip().split('\t')
+        if self.split_into_src_tgt:
+            src, tgt = self._split_seq_into_input_target(text)
+            
+        adjacency_matrix = self.subgraphs[id]['adjacency_matrix']
         
     def collate_fn(self, batch):
         pass

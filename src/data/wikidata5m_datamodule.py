@@ -5,14 +5,16 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from typing import Any, Dict, Optional, Tuple
 
+import torch
 from lightning import LightningDataModule
 from torch.utils.data import DataLoader, random_split
+from transformers import AutoTokenizer, AutoModel
 
-
-from src.data.components.wikidata5m.dataset import Wikidata5MDataset
 import src.data.components.wikidata5m.download as download
+from src.data.components.wikidata5m import preprocessing as preprocess
 from src.data.components.entity_linker import EntityLinker
 from src.data.components.graph_processor import GraphProcessor
+from src.data.components.wikidata5m.dataset import Wikidata5MDataset
 
 
 
@@ -61,8 +63,15 @@ class Wikidata5mDataModule(LightningDataModule): # https://pytorch-geometric.rea
         train_val_test_split: Tuple[float, float, float] = (0.8, 0.1, 0.1),
         batch_size: int = 64,
         k_hop: int = 2,
+        subgraph_retrieval: str = 'static', # or 'dynamic'
+        min_doc_len: int = 256,
         max_nodes: int = 256,
         timestep: int = 128,
+        mentions_threshold: int = 5,
+        degree_threshold: int = 8,
+        eigenvector_threshold: float = 0.5,
+        node_embedding_dim: int = 128,
+        max_graph_size_after_pruning: int = 524288,
         chunk_documents: bool = True,
         split_into_src_tgt: bool = True,
         num_workers: int = 0,
@@ -81,14 +90,30 @@ class Wikidata5mDataModule(LightningDataModule): # https://pytorch-geometric.rea
         # this line allows to access init params with 'self.hparams' attribute
         # also ensures init params will be stored in ckpt
         self.save_hyperparameters(logger=False)
+        
+        self.corpus_version = f'_min-{self.hparams.min_doc_len}' if self.hparams.min_doc_len > 0 else ''
 
         self.data_train: Optional[Wikidata5MDataset] = None
         self.data_val: Optional[Wikidata5MDataset] = None
         self.data_test: Optional[Wikidata5MDataset] = None
         
-        self.entity_linker: EntityLinker = None
-        self.graph_processor: GraphProcessor = None
-        self.tokenizer = None
+        if self.hparams.use_entity_embeddings:
+            if self.hparams.node_embedding_dim == 128:
+                node_embedding_model_name = "google/bert_uncased_L-2_H-128_A-2"
+            elif self.hparams.node_embedding_dim == 256:
+                node_embedding_model_name = "google/bert_uncased_L-4_H-256_A-4"
+            elif self.hparams.node_embedding_dim == 512:
+                node_embedding_model_name = "google/bert_uncased_L-8_H-512_A-8"
+            else:
+                raise ValueError(f"Invalid node embedding dimension: {self.hparams.node_embedding_dim}")
+        
+        self.node_tokenizer = AutoTokenizer.from_pretrained(node_embedding_model_name)
+        self.node_embedding_model = AutoModel.from_pretrained(node_embedding_model_name)
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        self.entity_linker: EntityLinker = EntityLinker(self.hparams.data_dir, self.corpus_version, self.hparams.use_entity_embeddings, embedding_dim=self.hparams.node_embedding_dim)
+        self.graph_processor: GraphProcessor = GraphProcessor(self.hparams.data_dir)
+        self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
 
     def prepare_data(self) -> None:
@@ -101,6 +126,23 @@ class Wikidata5mDataModule(LightningDataModule): # https://pytorch-geometric.rea
         """
         download.download_wikidata_dataset(self.hparams.data_dir)
         
+        preprocess.prune_corpus(self.hparams.data_dir, self.tokenizer, self.hparams.min_doc_len)
+        
+        preprocess.whitelist_nq_entities(self.entity_linker, self.hparams.data_dir)
+        
+        preprocess.embed_nodes(self.hparams.data_dir, self.node_tokenizer, self.node_embedding_model, self.device, self.hparams.node_embedding_dim)
+        
+        preprocess.build_faiss_index(self.hparams.data_dir, self.hparams.node_embedding_dim)
+        
+        self.entity_linker.link_entities_for_corpus(self.hparams.use_entity_embeddings)
+        
+        self.graph_processor.build_full_graph()
+        
+        self.graph_processor.prune_graph(self.hparams.mentions_threshold, self.hparams.degree_threshold, self.hparams.eigenvector_threshold, self.hparams.max_graph_size_after_pruning)
+        
+        if self.hparams.subgraph_retrieval == 'static':
+            self.graph_processor.find_subgraphs_for_corpus()
+        
 
     def setup(self, stage: Optional[str] = None) -> None:
         """Load data. Set variables: `self.data_train`, `self.data_val`, `self.data_test`.
@@ -112,26 +154,24 @@ class Wikidata5mDataModule(LightningDataModule): # https://pytorch-geometric.rea
 
         :param stage: The stage to setup. Either `"fit"`, `"validate"`, `"test"`, or `"predict"`. Defaults to ``None``.
         """
-        self.entity_linker = EntityLinker(self.hparams.data_dir, self.hparams.use_entity_embeddings)
         
-        self.graph_processor = GraphProcessor(self.hparams.data_dir)
-        
-        # dataset = Wikidata5MDataset(
-        #     self.hparams.data_dir, 
-        #     self.entity_linker, 
-        #     self.graph_processor, 
-        #     self.tokenizer, 
-        #     self.hparams.k_hop, 
-        #     self.hparams.max_nodes, 
-        #     self.hparams.timestep, 
-        #     self.hparams.chunk_documents,
-        #     self.hparams.split_into_src_tgt)
+        dataset = Wikidata5MDataset(
+            self.hparams.data_dir,
+            self.corpus_version,
+            self.hparams.subgraph_retrieval,
+            self.graph_processor,
+            self.hparams.k_hop,
+            self.hparams.max_nodes, 
+            self.hparams.timestep, 
+            self.hparams.chunk_documents,
+            self.hparams.split_into_src_tgt,
+            self.tokenizer) 
                 
-        # # load and split datasets only if not loaded already
-        # if not self.data_train and not self.data_val and not self.data_test:
-        #     self.data_train, self.data_val, self.data_test = random_split(
-        #         dataset, self.hparams.train_val_test_split
-        #     )
+        # load and split datasets only if not loaded already
+        if not self.data_train and not self.data_val and not self.data_test:
+            self.data_train, self.data_val, self.data_test = random_split(
+                dataset, self.hparams.train_val_test_split
+            )
 
     def train_dataloader(self) -> DataLoader[Any]:
         """Create and return the train dataloader.
@@ -203,13 +243,5 @@ class Wikidata5mDataModule(LightningDataModule): # https://pytorch-geometric.rea
 if __name__ == "__main__":
     # _ = Wikidata5mDataModule()
     
-    dm = Wikidata5mDataModule()
-    dm.setup()
-
-    from time import time
-    
-    start = time()
-    entities = dm.entity_linker.link_entities("The Monumentum Ancyranum (Latin 'Monument of Ancyra') or Temple of Augustus and Rome in Ancyra is an Augusteum in Ankara (ancient Ancyra), Turkey. The text of the Res Gestae Divi Augusti ('Deeds of the Divine Augustus') is inscribed on its walls, and is the most complete copy of that text. The temple is adjacent to the Hadji Bairam Mosque in the Ulus quarter.")
-    subgraph = dm.graph_processor.get_subgraph_for_entities(entities, 2, 256)
-    
-    print(f"Retrieving entities and subgraph took {time() - start} seconds.")
+    dm = Wikidata5mDataModule(use_entity_embeddings=True)
+    dm.prepare_data()
