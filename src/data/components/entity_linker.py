@@ -1,14 +1,13 @@
 import os
 import gzip
 import json
-import multiprocessing
+import pickle
 import joblib
-import numpy as np
 import torch
 import faiss
+from collections import defaultdict
 from marisa_trie import Trie
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModel
 
 # from src import utils
 
@@ -19,23 +18,25 @@ class EntityLinker:
     def __init__(
         self, 
         data_dir, 
+        corpus_version,
+        use_embeddings=False, 
         alias_file='wikidata5m_alias.tar.gz', 
         corpus_file='wikidata5m_text.txt.gz', 
-        embeddings_file='wikidata5m_entity_embeddings.pkl', 
-        use_embeddings=False, 
-        pretrained_name='bert-base-uncased'):
+        embedding_dim=128):
         
         self.data_dir = data_dir
         
         alias_path = os.path.join(data_dir, alias_file)
-        corpus_path = os.path.join(data_dir, corpus_file)
-        embeddings_path = os.path.join(self.data_dir, embeddings_file)
+        if corpus_version is None:
+            corpus_path = os.path.join(data_dir, corpus_file)
+        else:
+            corpus_path = os.path.join(data_dir, f"wikidata5m_text{corpus_version}.txt.gz")
         
         with gzip.open(corpus_path, 'rt', encoding='utf-8') as f:
             self.corpus = f.readlines()
             
         # Read the aliases file
-        with gzip.open(alias_file, 'rt', encoding='utf-8', errors='ignore') as file:
+        with gzip.open(alias_path, 'rt', encoding='utf-8', errors='ignore') as file:
             lines = file.readlines()[1:4813490]
         
         self.alias_to_id = {}
@@ -48,53 +49,20 @@ class EntityLinker:
         self.trie = Trie(self.alias_to_id.keys())
         
         self.use_embeddings = use_embeddings
-        if use_embeddings:
-            # Setup device and move model to GPU if available
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            self.tokenizer = AutoTokenizer.from_pretrained(pretrained_name)
-            self.model = AutoModel.from_pretrained(pretrained_name).to(self.device)
-            
-            # Compute entity embeddings using a pretrained huggingface model
-            self.entity_embeddings = self.compute_entity_embeddings(alias_path, embeddings_path)
-                
-            # Build Faiss index for efficient similarity search
-            self.index = self.build_faiss_index(self.entity_embeddings)    
-    
-    
-    def compute_entity_embeddings(self, alias_file, embeddings_file):
-        # Check if embeddings are already present on disk
-        if os.path.exists(embeddings_file):
-            with open(embeddings_file, 'rb') as f:
-                return joblib.load(f)
-
-        entity_embeddings = {}
-        with open(alias_file, 'r') as file:
-            for line in file:
-                parts = line.strip().split('\t')
-                entity_id = parts[0]
-                all_embeddings = []
-                for alias in parts[1:]:
-                    sentence = alias  # Since aliases are often short, we treat them as sentences
-                    inputs = self.tokenizer(sentence, return_tensors="pt").to(self.device)
-                    with torch.no_grad():
-                        outputs = self.model(**inputs)
-                    alias_embedding = outputs.last_hidden_state[0].mean(dim=0).cpu().numpy()
-                    all_embeddings.append(alias_embedding)
-                entity_embeddings[entity_id] = np.mean(all_embeddings, axis=0)
+        self.embedding_dim = embedding_dim
         
-        # Save the embeddings to disk        
-        with open(embeddings_file, 'wb') as f:
-            joblib.dump(entity_embeddings, f)
-                
-        return entity_embeddings
-    
-    
-    def build_faiss_index(self, entity_embeddings):
-        embedding_matrix = np.array(list(entity_embeddings.values())).astype('float32')
-        dimension = embedding_matrix.shape[1]
-        index = faiss.IndexFlatL2(dimension)
-        index.add(embedding_matrix)
-        return index
+        self.entity_embeddings = None
+        
+        self.faiss_index = None
+        self.index_mapping = None
+        
+        if use_embeddings:
+            embeddings_file = f"wikidata5m_entity_embeddings_dim-{embedding_dim}.pkl"
+
+            self.embeddings_path = os.path.join(data_dir, embeddings_file)
+            
+            index_file = f"wikidata5m_node_dim-{embedding_dim}.faiss"
+            self.index_path = os.path.join(data_dir, index_file) 
     
 
     def compute_contextual_embedding(self, mention, full_text, start_pos, end_pos):
@@ -194,23 +162,42 @@ class EntityLinker:
         return char_entities_found
 
 
-    def link_entities_for_corpus(self, n_docs=None):
-        if n_docs is not None:
-            output_file = os.path.join(self.data_dir, f"wikidata5m_entities_{n_docs}.jsonl.gz")
-        else:
-            output_file = os.path.join(self.data_dir, "wikidata5m_entities.jsonl.gz")
+    def link_entities_for_corpus(self, use_embeddings=False):
+        if use_embeddings:            
+            # Check if embeddings are already present on disk
+            if os.path.exists(self.embeddings_path):
+                with open(self.embeddings_path, 'rb') as f:
+                    self.embeddings = joblib.load(f)
         
-        n_docs = n_docs or len(self.corpus)
+            if os.path.exists(self.index_path) and os.path.exists(self.index_path + '.mapping'):
+                # Load the index and mapping
+                self.faiss_index = faiss.read_index(self.index_path)
+                with open(self.index_path + '.mapping', 'rb') as f:
+                    self.index_mapping = pickle.load(f)
+        
+        output_file = os.path.join(self.data_dir, "wikidata5m_entities_linked.jsonl.gz")
+        entity_mentions_file = os.path.join(self.data_dir, "wikidata5m_entity_mentions.json.gz")
+    
+        if not os.path.exists(entity_mentions_file):            
+            # Initialize a dictionary for counting entity mentions
+            entity_counts = defaultdict(int)
 
-        with gzip.open(output_file, 'wt') as f_out:
-           for document in tqdm(self.corpus[:n_docs], desc="Linking entities for corpus"):
-                    document_id, document_text = document.split('\t', 1)
-                    entities = self.link_entities(document_text)
-                    entry = {
-                        "doc_id": document_id,
-                        "entities": entities
-                    }
-                    f_out.write(json.dumps(entry) + "\n")
-
-print(os.getcwd())
-el = EntityLinker(data_dir="./data/wikidata5m")
+            with gzip.open(output_file, 'wt') as f_out:
+                for document in tqdm(self.corpus, desc="Linking entities for corpus"):
+                        document_id, document_text = document.split('\t', 1)
+                        entities = self.link_entities(document_text)
+                        entry = {
+                            "doc_id": document_id,
+                            "entities": entities
+                        }
+                        f_out.write(json.dumps(entry) + "\n")
+                        
+                        # Update the count for each entity in the document
+                        for entity_id, _, _ in entities:
+                            entity_counts[entity_id] += 1
+                            
+            # Save the entity counts to disk
+            if entity_mentions_file:
+                with gzip.open(entity_mentions_file, 'w') as f:
+                    json_str = json.dumps(entity_counts)
+                    f.write(json_str.encode('utf-8'))
