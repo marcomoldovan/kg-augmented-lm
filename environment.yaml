@@ -25,7 +25,7 @@ dependencies:
   - lightning=2.1.*
   - transformers
   - einops
-  - torchmetrics=0.*
+  - torchmetrics
   - hydra-core=1.*
   - rich=13.*
   - pre-commit=3.*
@@ -46,6 +46,7 @@ dependencies:
 
   - pip>=23
   - pip:
+      - bitsandbytes
       - hydra-optuna-sweeper
       - hydra-colorlog
       - rootutils
